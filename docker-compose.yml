@@ -1,0 +1,31 @@
+# Synthetic-Bull — Full-stack Docker Compose
+version: "3.9"
+
+services:
+  # ── Module 1: C++ Matching Engine + GBM Simulator ──
+  engine:
+    build: ./backend
+    container_name: synthetic-bull-engine
+    ports:
+      - "9001:9001"
+    restart: unless-stopped
+    networks:
+      - bull-net
+
+  # ── Module 2: React Frontend (placeholder — uncomment when ready) ──
+  # frontend:
+  #   build: ./frontend
+  #   container_name: synthetic-bull-frontend
+  #   ports:
+  #     - "3000:3000"
+  #   depends_on:
+  #     - engine
+  #   environment:
+  #     - REACT_APP_WS_URL=ws://engine:9001
+  #   restart: unless-stopped
+  #   networks:
+  #     - bull-net
+
+networks:
+  bull-net:
+    driver: bridge

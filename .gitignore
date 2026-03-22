@@ -1,0 +1,25 @@
+# Build artifacts
+build/
+cmake-build-*/
+*.o
+*.a
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+
+# Dependencies (fetched at build time)
+backend/deps/
+
+INTEGRATION.md
+README.md
