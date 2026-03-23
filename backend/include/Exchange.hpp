@@ -98,6 +98,28 @@ inline void Exchange::addSymbol(const SymbolConfig& cfg,
     state.simulator->setTickMs(20);
     state.simulator->setMaxBotOrders(300);
 
+    // Heston stochastic volatility
+    state.simulator->setKappa(cfg.kappa);
+    state.simulator->setTheta(cfg.theta);
+    state.simulator->setXi(cfg.xi);
+    state.simulator->setRho(cfg.rho);
+
+    // Merton jump diffusion
+    state.simulator->setJumpIntensity(cfg.jump_intensity);
+    state.simulator->setJumpMean(cfg.jump_mean);
+    state.simulator->setJumpStd(cfg.jump_std);
+
+    // Inventory-aware market making
+    state.simulator->setSkewFactor(cfg.skew_factor);
+    state.simulator->setInventoryLimit(cfg.inventory_limit);
+    state.simulator->setUseInventoryLimit(cfg.use_inventory_limit);
+
+    // Circuit breaker
+    state.simulator->setMaxTickMovePct(cfg.max_tick_move_pct);
+
+    // Asset correlation
+    state.simulator->setBeta(cfg.beta);
+
     // Create candle aggregator with callback
     state.candles = std::make_unique<CandleAggregator>(
         1000,

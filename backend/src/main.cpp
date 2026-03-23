@@ -20,26 +20,102 @@
 
 using json = nlohmann::json;
 
+// ─── Per-connection rate limiter (token bucket) ─────────────────────────────
+
+struct TokenBucket {
+    double tokens      = 50.0;   // start full
+    double max_tokens  = 50.0;   // max burst
+    double refill_rate = 50.0;   // tokens per second
+    uint64_t last_refill_ms = 0;
+
+    bool consume() {
+        uint64_t now = sb::now_ms();
+        if (last_refill_ms == 0) last_refill_ms = now;
+        double elapsed_s = (now - last_refill_ms) / 1000.0;
+        last_refill_ms = now;
+        tokens = std::min(max_tokens, tokens + elapsed_s * refill_rate);
+        if (tokens >= 1.0) {
+            tokens -= 1.0;
+            return true;
+        }
+        return false;
+    }
+};
+
 // ─── Per-connection data ─────────────────────────────────────────────────────
 
 struct PerSocketData {
     std::string user_id;
+    TokenBucket rate_limiter;
 };
 
 // ─── Default symbol configuration ────────────────────────────────────────────
 
 static std::vector<sb::SymbolConfig> getDefaultSymbols() {
+    // Fields: symbol, initial_price, sigma, mu, dt, spread_pct, levels,
+    //         kappa, theta, xi, rho,
+    //         jump_intensity, jump_mean, jump_std,
+    //         skew_factor, inventory_limit, max_tick_move_pct, beta
     return {
-        {"AAPL",   185.00, 0.015, 0.0005, 0.1, 0.0008, 5},
-        {"GOOGL",  175.00, 0.014, 0.0004, 0.1, 0.0008, 5},
-        {"MSFT",   420.00, 0.013, 0.0006, 0.1, 0.0008, 5},
-        {"AMZN",   185.00, 0.016, 0.0003, 0.1, 0.0008, 5},
-        {"TSLA",   250.00, 0.035, 0.0010, 0.1, 0.0008, 5},
-        {"META",   500.00, 0.018, 0.0005, 0.1, 0.0008, 5},
-        {"NVDA",   880.00, 0.030, 0.0020, 0.1, 0.0008, 5},
-        {"JPM",    195.00, 0.010, 0.0003, 0.1, 0.0008, 5},
-        {"BTC",  50000.00, 0.025, 0.0000, 0.1, 0.0008, 5},
-        {"ETH",   3500.00, 0.028, 0.0000, 0.1, 0.0008, 5},
+        // ── Tech stocks: moderate vol, negative leverage, symmetric jumps ──
+        //  symbol, price, sigma, mu, dt, spread_pct, levels,
+        //  kappa, theta, xi, rho,
+        //  jump_intensity, jump_mean, jump_std,
+        //  skew_factor, inventory_limit, use_inventory_limit, max_tick_move_pct, beta, sector
+        {"AAPL",   185.0, 0.015, 0.0, 0.00008, 0.0008, 5,
+         2.0, 0.000225, 0.08, -0.6,
+         0.3, 0.0, 0.02,
+         0.0002, 50.0, true, 0.02, 0.5, "tech"},
+
+        {"GOOGL",  175.0, 0.014, 0.0, 0.00008, 0.0008, 5,
+         2.5, 0.000196, 0.07, -0.5,
+         0.2, 0.0, 0.015,
+         0.0002, 50.0, true, 0.02, 0.45, "tech"},
+
+        {"MSFT",   420.0, 0.013, 0.0, 0.00008, 0.0008, 5,
+         2.5, 0.000169, 0.06, -0.5,
+         0.2, 0.0, 0.015,
+         0.0002, 50.0, true, 0.02, 0.5, "tech"},
+
+        {"AMZN",   185.0, 0.016, 0.0, 0.00008, 0.0008, 5,
+         2.0, 0.000256, 0.09, -0.55,
+         0.3, 0.0, 0.02,
+         0.0002, 50.0, true, 0.02, 0.4, "tech"},
+
+        // ── High-vol stock: TSLA ── explosive, heavy leverage, more jumps
+        {"TSLA",   250.0, 0.035, 0.0, 0.00008, 0.0010, 5,
+         1.5, 0.001225, 0.30, -0.7,
+         0.6, 0.0, 0.04,
+         0.0003, 40.0, true, 0.02, 0.60, "tech"},
+
+        {"META",   500.0, 0.018, 0.0, 0.00008, 0.0008, 5,
+         2.0, 0.000324, 0.10, -0.55,
+         0.3, 0.0, 0.025,
+         0.0002, 50.0, true, 0.02, 0.4, "tech"},
+
+        // ── Monster vol: NVDA ── chipmaker, high everything
+        {"NVDA",   880.0, 0.030, 0.0, 0.00008, 0.0010, 5,
+         1.8, 0.000900, 0.25, -0.65,
+         0.5, 0.0, 0.035,
+         0.0003, 40.0, true, 0.02, 0.45, "tech"},
+
+        // ── Stable financial: JPM ── low vol, strong mean-reversion
+        {"JPM",    195.0, 0.010, 0.0, 0.00008, 0.0006, 5,
+         3.0, 0.000100, 0.05, -0.3,
+         0.1, 0.0, 0.01,
+         0.0001, 80.0, true, 0.02, 0.55, "financial"},
+
+        // ── Crypto: BTC ── zero drift, huge vol-of-vol, heavy jumps, correlated
+        {"BTC",  50000.0, 0.025, 0.0, 0.00008, 0.0012, 5,
+         1.0, 0.000625, 0.35, -0.4,
+         0.8, 0.0, 0.05,
+         0.0004, 30.0, true, 0.02, 0.70, "crypto"},
+
+        // ── Crypto: ETH ── similar to BTC, correlated
+        {"ETH",   3500.0, 0.028, 0.0, 0.00008, 0.0012, 5,
+         1.0, 0.000784, 0.38, -0.4,
+         0.9, 0.0, 0.055,
+         0.0004, 30.0, true, 0.02, 0.65, "crypto"},
     };
 }
 
@@ -50,6 +126,19 @@ static sb::Exchange g_exchange;
 // Portfolio per user_id (cash is shared, positions are per-symbol)
 static std::unordered_map<std::string, sb::Portfolio> g_portfolios;
 static std::mutex g_portfolio_mutex;
+
+// Open orders per user_id — tracks resting limit orders
+// Key: user_id, Value: vector of {order_id, symbol, side, price, qty}
+struct OpenOrderInfo {
+    uint64_t    order_id;
+    std::string symbol;
+    std::string side;   // "buy" or "sell"
+    double      price;
+    double      orig_qty;
+    double      remaining_qty;
+};
+static std::unordered_map<std::string, std::vector<OpenOrderInfo>> g_open_orders;
+static std::mutex g_open_orders_mutex;
 
 // Trade queue (filled by trade callback, drained by broadcaster)
 // Each trade already has its symbol tagged
@@ -164,6 +253,26 @@ static json portfolioToJson(const sb::Portfolio& pf) {
     };
 }
 
+// Build JSON for a user's open orders
+static json openOrdersToJson(const std::string& uid) {
+    json arr = json::array();
+    std::lock_guard<std::mutex> lock(g_open_orders_mutex);
+    auto it = g_open_orders.find(uid);
+    if (it != g_open_orders.end()) {
+        for (auto& o : it->second) {
+            arr.push_back({
+                {"order_id",      o.order_id},
+                {"symbol",        o.symbol},
+                {"side",          o.side},
+                {"price",         std::round(o.price * 100.0) / 100.0},
+                {"orig_qty",      std::round(o.orig_qty * 100000.0) / 100000.0},
+                {"remaining_qty", std::round(o.remaining_qty * 100000.0) / 100000.0}
+            });
+        }
+    }
+    return json({{"type", "open_orders"}, {"orders", arr}});
+}
+
 // ─── JSON builders ───────────────────────────────────────────────────────────
 
 static json obSnapshotToJson(const std::string& symbol,
@@ -241,13 +350,54 @@ static void onTrade(const std::string& symbol, const sb::Trade& trade) {
         }
     }
 
-    // 2. Feed candle aggregator for this symbol
+    // 2. Reduce filled orders from open_orders tracking
+    {
+        std::lock_guard<std::mutex> lock(g_open_orders_mutex);
+        // Reduce from buyer's open orders
+        auto bit = g_open_orders.find(trade.buyer_id);
+        if (bit != g_open_orders.end()) {
+            auto& vec = bit->second;
+            for (auto it = vec.begin(); it != vec.end();) {
+                if (it->symbol == symbol && it->side == "buy" && std::abs(it->price - trade.price) < 0.005) {
+                    it->remaining_qty -= trade.quantity;
+                    if (it->remaining_qty <= 1e-8) {
+                        it = vec.erase(it);
+                    } else {
+                        ++it;
+                    }
+                    break;
+                } else {
+                    ++it;
+                }
+            }
+        }
+        // Reduce from seller's open orders
+        auto sit = g_open_orders.find(trade.seller_id);
+        if (sit != g_open_orders.end()) {
+            auto& vec = sit->second;
+            for (auto it = vec.begin(); it != vec.end();) {
+                if (it->symbol == symbol && it->side == "sell" && std::abs(it->price - trade.price) < 0.005) {
+                    it->remaining_qty -= trade.quantity;
+                    if (it->remaining_qty <= 1e-8) {
+                        it = vec.erase(it);
+                    } else {
+                        ++it;
+                    }
+                    break;
+                } else {
+                    ++it;
+                }
+            }
+        }
+    }
+
+    // 3. Feed candle aggregator for this symbol
     auto* state = g_exchange.get(symbol);
     if (state && state->candles) {
         state->candles->addTrade(trade.price, trade.quantity);
     }
 
-    // 3. Push to trade queue for broadcasting
+    // 4. Push to trade queue for broadcasting
     {
         std::lock_guard<std::mutex> lock(g_trade_mutex);
         g_trade_queue.push_back(trade);
@@ -307,13 +457,52 @@ static void broadcasterThread() {
     }
 }
 
+// ─── Sector-based correlated noise generator ────────────────────────────────
+// Three independent sector factors so JPM doesn't correlate with BTC.
+// Each sector gets its own N(0,1) drawn independently per tick cycle.
+// Symbols load on their sector factor via their beta coefficient.
+
+struct SectorFactors {
+    std::mt19937 rng{std::random_device{}()};
+    std::normal_distribution<double> normal{0.0, 1.0};
+    std::atomic<double> z_tech{0.0};
+    std::atomic<double> z_financial{0.0};
+    std::atomic<double> z_crypto{0.0};
+
+    void update() {
+        z_tech.store(normal(rng));
+        z_financial.store(normal(rng));
+        z_crypto.store(normal(rng));
+    }
+
+    double get(const std::string& sector) const {
+        if (sector == "crypto")    return z_crypto.load();
+        if (sector == "financial") return z_financial.load();
+        return z_tech.load();  // default
+    }
+};
+
+static SectorFactors g_sector_factors;
+
+// Symbol-to-sector mapping (built once at startup)
+static std::unordered_map<std::string, std::string> g_symbol_sector;
+
+static void updateSectorFactors() {
+    g_sector_factors.update();
+    g_exchange.forEachSymbol([&](const std::string& sym, sb::SymbolState& state) {
+        auto it = g_symbol_sector.find(sym);
+        std::string sector = (it != g_symbol_sector.end()) ? it->second : "tech";
+        state.simulator->setMarketFactor(g_sector_factors.get(sector));
+    });
+}
+
 // ─── main ────────────────────────────────────────────────────────────────────
 
 int main() {
-    std::cout << "╔══════════════════════════════════════════════╗\n"
-              << "║  Synthetic-Bull  ·  Module 1  ·  v2.0        ║\n"
-              << "║  Multi-Symbol Matching Engine + GBM Simulator ║\n"
-              << "╚══════════════════════════════════════════════╝\n\n";
+    std::cout << "╔══════════════════════════════════════════════════════╗\n"
+              << "║  Synthetic-Bull  ·  Module 1  ·  v3.0               ║\n"
+              << "║  Heston SV + Jump Diffusion + Smart Market Making   ║\n"
+              << "╚══════════════════════════════════════════════════════╝\n\n";
 
     // ── Configure symbols ──
     auto symbol_configs = getDefaultSymbols();
@@ -323,7 +512,11 @@ int main() {
         std::cout << "    " << cfg.symbol
                   << "  $" << cfg.initial_price
                   << "  σ=" << cfg.sigma
-                  << "  μ=" << cfg.mu << "\n";
+                  << "  κ=" << cfg.kappa
+                  << "  ξ=" << cfg.xi
+                  << "  ρ=" << cfg.rho
+                  << "  λ=" << cfg.jump_intensity
+                  << "  β=" << cfg.beta << "\n";
         g_exchange.addSymbol(cfg, onTrade, onCandle);
     }
     std::cout << "\n";
@@ -391,12 +584,13 @@ int main() {
                 }
             });
 
-            // 3. Portfolio
+            // 3. Portfolio + open orders
             {
                 std::lock_guard<std::mutex> lock(g_portfolio_mutex);
                 auto& pf = g_portfolios[uid];
                 ws->send(portfolioToJson(pf).dump(), uWS::OpCode::TEXT);
             }
+            ws->send(openOrdersToJson(uid).dump(), uWS::OpCode::TEXT);
 
             std::cout << "[+] " << uid << " connected\n";
         },
@@ -417,6 +611,16 @@ int main() {
 
             std::string msg_type = req.value("type", "");
 
+            // ── Rate limiting (token bucket: 50 msgs/sec) ──
+            if (msg_type != "ping") {
+                if (!data->rate_limiter.consume()) {
+                    ws->send(json({{"type", "error"},
+                                   {"message", "Rate limit exceeded (max 50 msgs/sec)"}}).dump(),
+                             uWS::OpCode::TEXT);
+                    return;
+                }
+            }
+
             // ── ping ──
             if (msg_type == "ping") {
                 ws->send(json({{"type", "pong"}, {"ts", sb::now_ms()}}).dump(),
@@ -429,8 +633,8 @@ int main() {
                 std::string symbol   = req.value("symbol", "");
                 std::string ot_str   = req.value("order_type", "");
                 std::string side_str = req.value("side", "");
-                double price = req.value("price", 0.0);
-                double qty   = req.value("qty", 0.0);
+                double price    = req.value("price", 0.0);
+                double orig_qty = req.value("qty", 0.0);
 
                 // Validate symbol
                 auto* state = g_exchange.get(symbol);
@@ -441,7 +645,7 @@ int main() {
                     return;
                 }
 
-                if (qty <= 0.0) {
+                if (orig_qty <= 0.0) {
                     ws->send(json({{"type", "error"},
                                    {"message", "qty must be positive"}}).dump(),
                              uWS::OpCode::TEXT);
@@ -478,8 +682,8 @@ int main() {
                 // Capital check (for buy orders)
                 if (side == sb::Side::BUY) {
                     double order_cost = (ot == sb::OrderType::LIMIT)
-                                            ? price * qty
-                                            : state->simulator->currentPrice() * qty * 1.01;
+                                            ? price * orig_qty
+                                            : state->simulator->currentPrice() * orig_qty * 1.01;
                     std::lock_guard<std::mutex> lock(g_portfolio_mutex);
                     auto it = g_portfolios.find(uid);
                     if (it != g_portfolios.end() && it->second.cash < order_cost) {
@@ -496,10 +700,21 @@ int main() {
                 order.side     = side;
                 order.type     = ot;
                 order.price    = price;
-                order.quantity = qty;
+                order.quantity = orig_qty; // This will be reduced directly by processOrder if partially filled
                 order.is_bot   = false;
 
                 int fills = state->engine->processOrder(order);
+
+                // Track resting limit orders
+                // processOrder modifies order.quantity to its remaining unfilled amount
+                if (ot == sb::OrderType::LIMIT && order.quantity > 1e-12) {
+                    std::lock_guard<std::mutex> lock(g_open_orders_mutex);
+                    g_open_orders[uid].push_back({
+                        order.id, symbol,
+                        (side == sb::Side::BUY) ? "buy" : "sell",
+                        price, orig_qty, order.quantity
+                    });
+                }
 
                 // Send ack
                 json ack = {
@@ -511,7 +726,7 @@ int main() {
                 };
                 ws->send(ack.dump(), uWS::OpCode::TEXT);
 
-                // Send updated portfolio
+                // Send updated portfolio + open orders
                 {
                     std::lock_guard<std::mutex> lock(g_portfolio_mutex);
                     auto it = g_portfolios.find(uid);
@@ -520,6 +735,7 @@ int main() {
                                  uWS::OpCode::TEXT);
                     }
                 }
+                ws->send(openOrdersToJson(uid).dump(), uWS::OpCode::TEXT);
 
                 return;
             }
@@ -538,6 +754,19 @@ int main() {
                 }
 
                 bool ok = state->engine->cancelOrder(oid);
+
+                // Remove from open orders tracking
+                if (ok) {
+                    std::lock_guard<std::mutex> lock(g_open_orders_mutex);
+                    auto oit = g_open_orders.find(uid);
+                    if (oit != g_open_orders.end()) {
+                        auto& vec = oit->second;
+                        vec.erase(std::remove_if(vec.begin(), vec.end(),
+                            [oid](const OpenOrderInfo& o) { return o.order_id == oid; }),
+                            vec.end());
+                    }
+                }
+
                 json resp = {
                     {"type", "cancel_ack"},
                     {"symbol", symbol},
@@ -545,6 +774,9 @@ int main() {
                     {"success", ok}
                 };
                 ws->send(resp.dump(), uWS::OpCode::TEXT);
+
+                // Send updated open orders
+                ws->send(openOrdersToJson(uid).dump(), uWS::OpCode::TEXT);
                 return;
             }
 
@@ -586,14 +818,30 @@ int main() {
     // Grab the loop pointer for deferred publishes
     g_loop = uWS::Loop::get();
 
-    // Start all GBM simulators
-    std::cout << "[~] Starting GBM simulators for all symbols...\n";
+    // ── 3-second warmup: start simulators to fill the order book ──
+    std::cout << "[~] Starting simulators (3s warmup — filling order books)...\n";
     g_exchange.startAll();
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    std::cout << "[✓] Warmup complete — order books are filled\n";
 
     // Start the broadcaster (Thread N+1)
-    std::cout << "[~] Starting broadcaster (100ms interval)\n";
+    std::cout << "[~] Starting broadcaster (100ms interval + correlated noise)\n";
     std::thread broadcaster(broadcasterThread);
     broadcaster.detach();
+
+    // Build symbol→sector mapping for correlation
+    for (auto& cfg : symbol_configs) {
+        g_symbol_sector[cfg.symbol] = cfg.sector;
+    }
+
+    // Start sector-based correlated noise generator
+    std::thread sector_factor_thread([]() {
+        while (true) {
+            updateSectorFactors();
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    });
+    sector_factor_thread.detach();
 
     std::cout << "[✓] All systems operational — " << symbol_configs.size()
               << " symbols active — ready for connections\n\n";
