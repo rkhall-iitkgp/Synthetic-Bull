@@ -228,6 +228,38 @@
 
         /* ── Utility ── */
         .empty-state { color: var(--text-dim); text-align: center; padding: 20px; font-size: 12px; }
+
+        /* ── Bot Status Panels ── */
+        .bot-panel { overflow-y: auto; }
+        .bot-header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 14px; border-bottom: 1px solid var(--panel-border);
+        }
+        .bot-name { font-weight: 600; font-size: 12px; display: flex; align-items: center; gap: 8px; }
+        .bot-dot {
+            width: 7px; height: 7px; border-radius: 50%;
+            background: var(--buy-color); box-shadow: 0 0 6px var(--buy-color);
+            transition: background 0.3s, box-shadow 0.3s;
+        }
+        .bot-dot.offline { background: var(--sell-color); box-shadow: 0 0 6px var(--sell-color); }
+        .bot-badge {
+            font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 4px;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .bot-badge.long { background: var(--buy-bg); color: var(--buy-color); }
+        .bot-badge.short { background: var(--sell-bg); color: var(--sell-color); }
+        .bot-badge.flat { background: rgba(100,116,139,0.1); color: var(--text-dim); }
+        .bot-badge.offline { background: rgba(239,68,68,0.1); color: var(--sell-color); }
+        .bot-kpis {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
+            background: var(--panel-border);
+        }
+        .bot-kpi {
+            padding: 8px 14px; background: var(--panel-bg);
+            display: flex; flex-direction: column; gap: 2px;
+        }
+        .bot-kpi .label { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+        .bot-kpi .value { font-size: 13px; font-weight: 600; font-family: var(--font-mono); }
     </style>
 </head>
 <body>
@@ -327,6 +359,36 @@
             </div>
             <div class="pos-header"><span>Asset</span><span>Holdings</span><span>PnL</span></div>
             <div class="pos-list" id="pfPositions"><div class="empty-state">No positions</div></div>
+        </div>
+        <!-- Bot Status Panels -->
+        <div class="panel bot-panel">
+            <div class="panel-title">Bot Status</div>
+            <!-- Alpha Bot -->
+            <div class="bot-header">
+                <div class="bot-name"><span class="bot-dot" id="alphaDot"></span>Alpha Bot <span style="color:var(--text-dim);font-weight:400;font-size:11px">(BTC)</span></div>
+                <span class="bot-badge flat" id="alphaBadge">FLAT</span>
+            </div>
+            <div class="bot-kpis" id="alphaKpis">
+                <div class="bot-kpi"><span class="label">Equity</span><span class="value" id="alphaEquity">$100,000</span></div>
+                <div class="bot-kpi"><span class="label">PnL</span><span class="value" id="alphaPnl">$0.00</span></div>
+                <div class="bot-kpi"><span class="label">Trades</span><span class="value" id="alphaTrades">0</span></div>
+                <div class="bot-kpi"><span class="label">Win Rate</span><span class="value" id="alphaWinRate">0%</span></div>
+                <div class="bot-kpi"><span class="label">Sharpe</span><span class="value" id="alphaSharpe">0.00</span></div>
+                <div class="bot-kpi"><span class="label">Max DD</span><span class="value" id="alphaDD">0.00%</span></div>
+            </div>
+            <!-- Market Maker Bot -->
+            <div class="bot-header" style="border-top: 1px solid var(--panel-border);">
+                <div class="bot-name"><span class="bot-dot" id="mmDot"></span>Market Maker <span style="color:var(--text-dim);font-weight:400;font-size:11px">(AAPL)</span></div>
+                <span class="bot-badge flat" id="mmBadge">FLAT</span>
+            </div>
+            <div class="bot-kpis" id="mmKpis">
+                <div class="bot-kpi"><span class="label">Equity</span><span class="value" id="mmEquity">$100,000</span></div>
+                <div class="bot-kpi"><span class="label">PnL</span><span class="value" id="mmPnl">$0.00</span></div>
+                <div class="bot-kpi"><span class="label">Total Fills</span><span class="value" id="mmFills">0</span></div>
+                <div class="bot-kpi"><span class="label">Bid / Ask</span><span class="value" id="mmBidAsk">0 / 0</span></div>
+                <div class="bot-kpi"><span class="label">Fill Balance</span><span class="value" id="mmBalance">50%</span></div>
+                <div class="bot-kpi"><span class="label">Max DD</span><span class="value" id="mmDD">0.00%</span></div>
+            </div>
         </div>
     </div>
 </div>
@@ -556,6 +618,60 @@
         } catch(e) { setTimeout(connect, 2000); }
     }
     connect();
+
+    // ─── Bot Status Polling ───
+    function setBotBadge(id, pos) {
+        const el = document.getElementById(id);
+        const p = (pos || 'FLAT').toUpperCase();
+        el.innerText = p;
+        el.className = 'bot-badge ' + (p === 'LONG' ? 'long' : p === 'SHORT' ? 'short' : 'flat');
+    }
+    function pnlColor(val) { return val >= 0 ? 'var(--buy-color)' : 'var(--sell-color)'; }
+
+    async function pollAlphaBot() {
+        try {
+            const res = await fetch('http://127.0.0.1:3001/bot/status', {signal: AbortSignal.timeout(1500)});
+            const d = await res.json();
+            document.getElementById('alphaDot').className = 'bot-dot';
+            document.getElementById('alphaEquity').innerText = fmtUSD(d.equity || 100000);
+            const pnl = d.pnl || 0;
+            const pnlEl = document.getElementById('alphaPnl');
+            pnlEl.innerText = fmtUSD(pnl); pnlEl.style.color = pnlColor(pnl);
+            document.getElementById('alphaTrades').innerText = d.trades || 0;
+            document.getElementById('alphaWinRate').innerText = ((d.winRate || 0) * 100).toFixed(1) + '%';
+            document.getElementById('alphaSharpe').innerText = (d.sharpe || 0).toFixed(2);
+            document.getElementById('alphaDD').innerText = ((d.maxDrawdown || 0) * 100).toFixed(2) + '%';
+            setBotBadge('alphaBadge', d.position);
+        } catch(e) {
+            document.getElementById('alphaDot').className = 'bot-dot offline';
+            setBotBadge('alphaBadge', 'offline');
+            document.getElementById('alphaBadge').className = 'bot-badge offline';
+        }
+    }
+
+    async function pollMMBot() {
+        try {
+            const res = await fetch('http://127.0.0.1:3002/bot/status', {signal: AbortSignal.timeout(1500)});
+            const d = await res.json();
+            document.getElementById('mmDot').className = 'bot-dot';
+            document.getElementById('mmEquity').innerText = fmtUSD(d.equity || 100000);
+            const pnl = d.pnl || 0;
+            const pnlEl = document.getElementById('mmPnl');
+            pnlEl.innerText = fmtUSD(pnl); pnlEl.style.color = pnlColor(pnl);
+            document.getElementById('mmFills').innerText = d.totalFills || 0;
+            document.getElementById('mmBidAsk').innerText = (d.bidFills || 0) + ' / ' + (d.askFills || 0);
+            document.getElementById('mmBalance').innerText = ((d.fillBalance || 0.5) * 100).toFixed(1) + '%';
+            document.getElementById('mmDD').innerText = ((d.maxDrawdown || 0) * 100).toFixed(2) + '%';
+            setBotBadge('mmBadge', d.position);
+        } catch(e) {
+            document.getElementById('mmDot').className = 'bot-dot offline';
+            setBotBadge('mmBadge', 'offline');
+            document.getElementById('mmBadge').className = 'bot-badge offline';
+        }
+    }
+
+    setInterval(() => { pollAlphaBot(); pollMMBot(); }, 2000);
+    setTimeout(() => { pollAlphaBot(); pollMMBot(); }, 500);
 </script>
 </body>
 </html>

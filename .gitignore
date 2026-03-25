@@ -3,6 +3,10 @@ build/
 cmake-build-*/
 *.o
 *.a
+.venv/
+__pycache__/
+*.pyc
+*.pyo
 
 # IDE
 .idea/
