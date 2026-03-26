@@ -1,0 +1,355 @@
+"""
+Alpha Bot - main event loop.
+
+Run with:
+    python -m alpha.main
+"""
+
+import asyncio
+
+from alpha.drawdown_guard import DrawdownGuard
+from alpha.indicators import IndicatorEngine
+from alpha.kpi_tracker import KPITracker
+from alpha.risk_manager import RiskManager
+from alpha.signal_scorer import SignalScorer
+from alpha.status_server import run as run_status_server
+from alpha.status_server import update_status
+from alpha.tick_buffer import TickBuffer
+from shared.config import ALPHA_SYMBOL, ALPHA_TP_PCT, ALPHA_STOP_PCT, STARTING_EQUITY
+from shared.exchange_client import ExchangeClient
+
+
+class AlphaBot:
+    def __init__(self):
+        self.symbol: str = ALPHA_SYMBOL
+        self.client = ExchangeClient(on_message=self._handle_message)
+        self.buffer = TickBuffer()
+        self.indicators = IndicatorEngine()
+        self.scorer = SignalScorer()
+        self.risk = RiskManager(symbol=ALPHA_SYMBOL)
+        self.drawdown = DrawdownGuard(STARTING_EQUITY)
+        self.kpi = KPITracker()
+        self.pending_tp_order_id: int | None = None
+        self.latest_mid: float = 0.0
+
+        self._initial_replay_done = True
+        self._waiting_for_entry_ack = False
+        self._waiting_for_tp_ack = False
+        self._pending_entry_qty: float = 0.0
+        self._pending_entry_price: float = 0.0
+        self._pending_entry_side: str = "long"
+        self._candle_count: int = 0
+
+    async def run(self):
+        await asyncio.gather(
+            self.client.run(),
+            run_status_server(),
+        )
+
+    async def _handle_message(self, msg: dict):
+        t = msg.get("type")
+
+        if t == "welcome":
+            self.client.user_id = msg.get("user_id")
+            self._initial_replay_done = True
+            return
+
+        if t == "portfolio":
+            self.risk.on_portfolio_update(msg)
+            return
+
+        if t == "open_orders":
+            await self._on_open_orders(msg)
+            return
+
+        if t == "error":
+            print(f"[AlphaBot] Exchange error: {msg.get('message')}")
+            return
+
+        if t == "pong":
+            return
+
+        if msg.get("symbol") != self.symbol:
+            return
+
+        if t == "candle":
+            await self._on_candle(msg)
+
+        elif t == "orderbook":
+            self.latest_mid = msg.get("mid", self.latest_mid)
+            await self._check_stop_loss()
+            self._update_status()
+
+        elif t == "trade":
+            await self._on_trade(msg)
+
+        elif t == "ack":
+            await self._on_ack(msg)
+
+        elif t == "cancel_ack":
+            pass
+
+    async def _on_open_orders(self, msg: dict):
+        orders = msg.get("orders", [])
+        for o in orders:
+            if o.get("symbol") != self.symbol:
+                continue
+            # Restore TP orders: sell TP for longs, buy TP for shorts
+            if self.pending_tp_order_id is None:
+                if o.get("side") == "sell" or o.get("side") == "buy":
+                    self.pending_tp_order_id = o["order_id"]
+                    print(
+                        f"[AlphaBot] Restored TP order {o['order_id']} "
+                        f"{o['side']} @ {o['price']} from open_orders"
+                    )
+
+    def _reset_for_new_session(self):
+        self.buffer = TickBuffer()
+        self.risk = RiskManager(symbol=self.symbol)
+        self.drawdown = DrawdownGuard(STARTING_EQUITY)
+        self.kpi = KPITracker()
+        self.pending_tp_order_id = None
+        self.latest_mid = 0.0
+        self._initial_replay_done = True
+        self._waiting_for_entry_ack = False
+        self._waiting_for_tp_ack = False
+        self._pending_entry_qty = 0.0
+        self._pending_entry_price = 0.0
+        self._pending_entry_side = "long"
+        self._candle_count = 0
+        self._update_status()
+
+    async def _on_candle(self, msg: dict):
+        close_price = float(msg["c"])
+        self.buffer.add(close_price)
+
+        if not self._initial_replay_done:
+            return
+
+        self.risk.tick()
+        self._candle_count += 1
+
+        total_val = self.risk.get_equity()
+        circuit_fired = self.drawdown.tick(total_val)
+        if circuit_fired:
+            await self._emergency_exit("CIRCUIT_BREAKER")
+            return
+
+        if not self.risk.is_flat():
+            await self._check_signal_reversal(close_price)
+            self._update_status()
+            return
+
+        if self.buffer.is_ready() and not self.drawdown.is_halted():
+            await self._check_entry(close_price)
+
+        self._update_status()
+
+    async def _cancel_tp_if_any(self):
+        if self.pending_tp_order_id is not None:
+            await self.client.cancel(self.symbol, self.pending_tp_order_id)
+            self.pending_tp_order_id = None
+
+    async def _check_stop_loss(self):
+        if self.risk.is_flat():
+            return
+        if not self.risk.should_stop_loss(self.latest_mid):
+            return
+
+        position = self.risk.get_position()
+        if position is None:
+            return
+
+        await self._cancel_tp_if_any()
+
+        # Exit direction depends on position side
+        if position.side == "long":
+            await self.client.place_market(self.symbol, "sell", position.quantity)
+        else:
+            await self.client.place_market(self.symbol, "buy", position.quantity)
+
+        self.risk.close_position(self.latest_mid, "STOP_LOSS")
+        self.kpi.record_trade(
+            position.entry_price,
+            self.latest_mid,
+            position.quantity,
+            "STOP_LOSS",
+            self.risk.get_equity(),
+        )
+
+    async def _check_signal_reversal(self, price: float):
+        if not self.buffer.is_ready():
+            return
+
+        votes = self.indicators.compute(self.buffer.get())
+        signal = self.scorer.score(votes)
+        if not self.risk.should_reverse_exit(signal["decision"], signal["score"]):
+            return
+
+        position = self.risk.get_position()
+        if position is None:
+            return
+
+        await self._cancel_tp_if_any()
+
+        # Exit direction depends on position side
+        if position.side == "long":
+            await self.client.place_market(self.symbol, "sell", position.quantity)
+        else:
+            await self.client.place_market(self.symbol, "buy", position.quantity)
+
+        self.risk.close_position(price, "SIGNAL_REVERSAL")
+        self.kpi.record_trade(
+            position.entry_price,
+            price,
+            position.quantity,
+            "SIGNAL_REVERSAL",
+            self.risk.get_equity(),
+        )
+
+    async def _check_entry(self, price: float):
+        votes = self.indicators.compute(self.buffer.get())
+        signal = self.scorer.score(votes)
+
+        # Debug logging every 10 candles
+        if self._candle_count % 10 == 0:
+            print(
+                f"[AlphaBot] {self.symbol} score={signal['score']:.3f} "
+                f"decision={signal['decision']} confidence={signal['confidence']:.2f} "
+                f"votes={{ema:{votes['ema']:.2f} rsi:{votes['rsi']:.2f} "
+                f"macd:{votes['macd']:.2f} bb:{votes['bollinger']:.2f}}} "
+                f"cooldown={self.risk.cooldown} mid={price:.2f}"
+            )
+
+        if signal["decision"] == "BUY":
+            qty = self.risk.calculate_size(price, signal["confidence"], self.drawdown.is_halted())
+            if qty <= 0:
+                return
+
+            print(f"[AlphaBot] ▲ LONG entry signal | score={signal['score']:.3f} qty={qty:.4f} @ ~{price:.2f}")
+            await self.client.place_market(self.symbol, "buy", qty)
+            self._waiting_for_entry_ack = True
+            self._pending_entry_qty = qty
+            self._pending_entry_price = price
+            self._pending_entry_side = "long"
+
+        elif signal["decision"] == "SELL":
+            qty = self.risk.calculate_size(price, signal["confidence"], self.drawdown.is_halted())
+            if qty <= 0:
+                return
+
+            print(f"[AlphaBot] ▼ SHORT entry signal | score={signal['score']:.3f} qty={qty:.4f} @ ~{price:.2f}")
+            await self.client.place_market(self.symbol, "sell", qty)
+            self._waiting_for_entry_ack = True
+            self._pending_entry_qty = qty
+            self._pending_entry_price = price
+            self._pending_entry_side = "short"
+
+    async def _on_ack(self, msg: dict):
+        fills = int(msg.get("fills", 0))
+        order_id = int(msg["order_id"])
+
+        if self._waiting_for_entry_ack and fills > 0:
+            self._waiting_for_entry_ack = False
+            self._waiting_for_tp_ack = True
+            entry_price = self.latest_mid if self.latest_mid > 0 else self._pending_entry_price
+            self._pending_entry_price = entry_price
+
+            # Place take-profit in the opposite direction
+            if self._pending_entry_side == "long":
+                tp_price = entry_price * (1.0 + ALPHA_TP_PCT)
+                await self.client.place_limit(self.symbol, "sell", tp_price, self._pending_entry_qty)
+            else:
+                tp_price = entry_price * (1.0 - ALPHA_TP_PCT)
+                await self.client.place_limit(self.symbol, "buy", tp_price, self._pending_entry_qty)
+            return
+
+        if self._waiting_for_tp_ack:
+            self._waiting_for_tp_ack = False
+            self.pending_tp_order_id = order_id
+            self.risk.open_position(
+                self._pending_entry_price,
+                self._pending_entry_qty,
+                self.pending_tp_order_id,
+                side=self._pending_entry_side,
+            )
+            print(
+                f"[AlphaBot] Position opened: {self._pending_entry_side.upper()} "
+                f"qty={self._pending_entry_qty:.4f} @ {self._pending_entry_price:.2f} "
+                f"TP order={self.pending_tp_order_id}"
+            )
+            self._pending_entry_qty = 0.0
+            self._pending_entry_price = 0.0
+
+    async def _on_trade(self, msg: dict):
+        if self.pending_tp_order_id is None or self.client.user_id is None:
+            return
+
+        position = self.risk.get_position()
+        if position is None:
+            self.pending_tp_order_id = None
+            return
+
+        # Detect our TP fill: for longs we are the seller, for shorts we are the buyer
+        if position.side == "long":
+            if msg.get("seller") != self.client.user_id:
+                return
+        else:
+            if msg.get("buyer") != self.client.user_id:
+                return
+
+        fill_price = float(msg["price"])
+        self.risk.on_take_profit_filled(fill_price)
+        self.kpi.record_trade(
+            position.entry_price,
+            fill_price,
+            position.quantity,
+            "TAKE_PROFIT",
+            self.risk.get_equity(),
+        )
+        self.pending_tp_order_id = None
+
+    async def _emergency_exit(self, reason: str):
+        if self.risk.is_flat():
+            return
+
+        position = self.risk.get_position()
+        if position is None:
+            return
+
+        await self._cancel_tp_if_any()
+
+        # Exit in the opposite direction
+        if position.side == "long":
+            await self.client.place_market(self.symbol, "sell", position.quantity)
+        else:
+            await self.client.place_market(self.symbol, "buy", position.quantity)
+
+        exit_price = self.latest_mid if self.latest_mid > 0 else position.entry_price
+        self.risk.close_position(exit_price, reason)
+        self.kpi.record_trade(
+            position.entry_price,
+            exit_price,
+            position.quantity,
+            reason,
+            self.risk.get_equity(),
+        )
+
+    def _total_value(self) -> float:
+        return self.risk.get_equity()
+
+    def _update_status(self):
+        pos = "FLAT"
+        position = self.risk.get_position()
+        if position:
+            pos = position.side.upper()
+        update_status(self.kpi.get_status(self.risk.get_equity(), pos))
+
+
+async def main():
+    bot = AlphaBot()
+    await bot.run()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

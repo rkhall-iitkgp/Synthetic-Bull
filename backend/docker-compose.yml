@@ -1,0 +1,10 @@
+# Backend-only Docker Compose (for development)
+version: "3.9"
+
+services:
+  engine:
+    build: .
+    container_name: synthetic-bull-engine
+    ports:
+      - "9001:9001"
+    restart: unless-stopped

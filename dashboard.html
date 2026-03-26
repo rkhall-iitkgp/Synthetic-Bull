@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SyntheticBull — Exchange Dashboard</title>
+    <meta name="description" content="Real-time multi-symbol exchange dashboard powered by Heston + Merton stochastic models">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        :root {
+            --bg-base: #0a0e17;
+            --bg-elevated: #111827;
+            --panel-bg: #131a2b;
+            --panel-border: #1e293b;
+            --text-main: #e2e8f0;
+            --text-muted: #64748b;
+            --text-dim: #475569;
+            --accent: #3b82f6;
+            --accent-glow: rgba(59, 130, 246, 0.15);
+            --buy-color: #22c55e;
+            --buy-bg: rgba(34, 197, 94, 0.10);
+            --buy-glow: rgba(34, 197, 94, 0.25);
+            --sell-color: #ef4444;
+            --sell-bg: rgba(239, 68, 68, 0.10);
+            --sell-glow: rgba(239, 68, 68, 0.25);
+            --font-main: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            --font-mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+            --radius: 8px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: var(--font-main);
+            background: var(--bg-base);
+            color: var(--text-main);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            font-size: 13px;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        ::-webkit-scrollbar { width: 5px; height: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 5px; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+        /* ── Header ── */
+        header {
+            display: flex; justify-content: space-between; align-items: center;
+            height: 52px; padding: 0 24px;
+            background: var(--bg-elevated);
+            border-bottom: 1px solid var(--panel-border);
+            z-index: 10;
+        }
+        .logo {
+            font-size: 17px; font-weight: 700; letter-spacing: -0.3px;
+            display: flex; align-items: center; gap: 10px;
+        }
+        .logo-icon {
+            width: 28px; height: 28px; border-radius: 6px;
+            background: linear-gradient(135deg, var(--accent), #8b5cf6);
+            display: flex; align-items: center; justify-content: center;
+        }
+        .logo-icon svg { width: 16px; height: 16px; }
+        .header-right { display: flex; gap: 14px; align-items: center; }
+        .conn-status {
+            display: flex; align-items: center; gap: 6px;
+            padding: 5px 12px; border-radius: 6px; font-size: 11px; font-weight: 500;
+            background: rgba(34, 197, 94, 0.08); color: var(--buy-color);
+        }
+        .conn-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--buy-color); box-shadow: 0 0 6px var(--buy-color); animation: pulse 2s infinite;}
+        @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+        .user-badge {
+            padding: 5px 12px; border-radius: 6px; font-size: 12px; font-weight: 600;
+            background: var(--panel-bg); border: 1px solid var(--panel-border); color: var(--text-muted);
+        }
+
+        /* ── Layout ── */
+        .layout {
+            display: grid;
+            grid-template-columns: 220px 1fr 320px;
+            flex: 1; overflow: hidden; gap: 1px;
+            background: var(--panel-border);
+        }
+        .panel {
+            background: var(--panel-bg);
+            display: flex; flex-direction: column; overflow: hidden; min-height: 0;
+        }
+        .panel-title {
+            padding: 12px 16px; font-weight: 600; font-size: 12px;
+            color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--panel-border);
+            display: flex; justify-content: space-between; align-items: center;
+        }
+
+        /* ── Sidebar ── */
+        .symbol-list { overflow-y: auto; flex: 1; padding: 4px 0; }
+        .sym-item {
+            padding: 10px 16px; cursor: pointer;
+            display: flex; justify-content: space-between; align-items: center;
+            transition: all 0.15s ease; border-left: 3px solid transparent;
+        }
+        .sym-item:hover { background: rgba(59, 130, 246, 0.04); }
+        .sym-item.active { background: rgba(59, 130, 246, 0.08); border-left-color: var(--accent); }
+        .sym-info { display: flex; flex-direction: column; gap: 2px; }
+        .sym-name { font-weight: 600; font-size: 13px; color: var(--text-main); }
+        .sym-sector { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+        .sym-price { font-family: var(--font-mono); font-size: 13px; font-weight: 500; }
+
+        /* ── Center ── */
+        .center-col { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel-border); gap: 1px; }
+        .chart-panel { flex: 1; position: relative; }
+        .chart-header {
+            position: absolute; top: 0; left: 0; right: 0; z-index: 5;
+            padding: 12px 20px; display: flex; align-items: center; gap: 16px;
+            background: linear-gradient(180deg, var(--panel-bg) 0%, transparent 100%);
+        }
+        .chart-symbol { font-size: 18px; font-weight: 700; }
+        #chart-container { position: absolute; top: 48px; left: 0; right: 0; bottom: 0; }
+
+        .bottom-row { height: 260px; display: grid; grid-template-columns: 300px 1fr; gap: 1px; }
+
+        /* ── Order Entry ── */
+        .order-panel { padding: 16px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+        .side-tabs {
+            display: flex; border-radius: 6px; overflow: hidden;
+            background: var(--bg-base); border: 1px solid var(--panel-border);
+        }
+        .side-tabs button {
+            flex: 1; padding: 8px; border: none; font-weight: 600; font-size: 12px;
+            cursor: pointer; transition: all 0.2s; background: transparent; color: var(--text-dim);
+        }
+        .side-tabs button.active.buy { background: var(--buy-color); color: white; }
+        .side-tabs button.active.sell { background: var(--sell-color); color: white; }
+        .oe-field {
+            display: flex; align-items: center; gap: 8px;
+            background: var(--bg-base); border: 1px solid var(--panel-border);
+            border-radius: 6px; padding: 0 12px; height: 36px;
+            transition: border-color 0.2s;
+        }
+        .oe-field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
+        .oe-field label { color: var(--text-dim); font-size: 11px; width: 50px; flex-shrink: 0; }
+        .oe-field input, .oe-field select {
+            flex: 1; background: transparent; border: none; color: var(--text-main);
+            text-align: right; font-family: var(--font-mono); font-size: 13px; outline: none;
+        }
+        .oe-field .unit { color: var(--text-dim); font-size: 11px; margin-left: 4px; }
+        .btn-order {
+            width: 100%; height: 38px; border: none; border-radius: 6px;
+            font-size: 13px; font-weight: 600; color: white; cursor: pointer;
+            transition: all 0.15s;
+        }
+        .btn-order:hover { filter: brightness(1.15); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+        .btn-order:active { transform: translateY(0); }
+
+        /* ── Open Orders ── */
+        .oo-panel { display: flex; flex-direction: column; overflow-y: auto; }
+        .oo-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        .oo-table th {
+            text-align: left; padding: 10px 12px; color: var(--text-dim); font-weight: 500;
+            border-bottom: 1px solid var(--panel-border); position: sticky; top: 0;
+            background: var(--panel-bg); font-size: 11px;
+        }
+        .oo-table td { padding: 8px 12px; border-bottom: 1px solid rgba(30,41,59,0.5); font-family: var(--font-mono); font-size: 11px; }
+        .oo-table .r { text-align: right; }
+        .btn-cancel {
+            background: transparent; color: var(--sell-color); border: 1px solid rgba(239,68,68,0.3);
+            padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 10px; font-weight: 500;
+            transition: all 0.15s;
+        }
+        .btn-cancel:hover { background: var(--sell-bg); border-color: var(--sell-color); }
+
+        /* ── Right Column ── */
+        .right-col { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel-border); gap: 1px; }
+
+        /* ── OrderBook ── */
+        .ob-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+        .ob-wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; font-family: var(--font-mono); font-size: 11px; overflow: hidden; }
+        .ob-hdr { display: grid; grid-template-columns: 1fr 1fr 1fr; padding: 8px 12px; color: var(--text-dim); font-size: 10px; text-transform: uppercase; letter-spacing: 0.3px; border-bottom: 1px solid var(--panel-border); }
+        .ob-hdr div:nth-child(2), .ob-hdr div:nth-child(3) { text-align: right; }
+        .ob-asks, .ob-bids { flex: 1 1 0; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+        .ob-asks { justify-content: flex-end; }
+        .ob-row {
+            display: grid; grid-template-columns: 1fr 1fr 1fr; padding: 2px 12px;
+            cursor: pointer; position: relative; z-index: 1; transition: background 0.1s;
+        }
+        .ob-row:hover { background: rgba(255,255,255,0.03); }
+        .ob-row div:nth-child(3), .ob-row div:nth-child(4) { text-align: right; }
+        .ob-bar { position: absolute; top: 0; bottom: 0; right: 0; z-index: -1; opacity: 0.15; }
+        .ob-asks .ob-row div:nth-child(2) { color: var(--sell-color); }
+        .ob-bids .ob-row div:nth-child(2) { color: var(--buy-color); }
+        .ob-mid {
+            text-align: center; font-size: 18px; font-weight: 700; padding: 10px 0;
+            display: flex; justify-content: center; align-items: center; gap: 10px;
+            border-top: 1px solid var(--panel-border); border-bottom: 1px solid var(--panel-border);
+            background: var(--bg-base);
+        }
+        .ob-spread { font-size: 11px; color: var(--text-dim); font-weight: 400; }
+
+        /* ── Portfolio ── */
+        .pf-panel { height: 280px; overflow-y: auto; }
+        .pf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--panel-border); }
+        .pf-card {
+            padding: 12px 14px; background: var(--panel-bg);
+            display: flex; flex-direction: column; gap: 4px;
+        }
+        .pf-card .label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+        .pf-card .value { font-size: 14px; font-weight: 600; font-family: var(--font-mono); }
+        .pos-header {
+            display: grid; grid-template-columns: 55px 1fr 80px; font-size: 10px;
+            color: var(--text-dim); padding: 8px 14px 4px; text-transform: uppercase; letter-spacing: 0.3px;
+            border-bottom: 1px solid var(--panel-border);
+        }
+        .pos-header span:nth-child(2), .pos-header span:nth-child(3) { text-align: right; }
+        .pos-list { padding: 4px 0; }
+        .pos-row {
+            display: grid; grid-template-columns: 55px 1fr 80px; font-size: 11px;
+            font-family: var(--font-mono); padding: 5px 14px; align-items: center;
+            transition: background 0.15s;
+        }
+        .pos-row:hover { background: rgba(59,130,246,0.04); }
+        .pos-row span:nth-child(2), .pos-row span:nth-child(3) { text-align: right; }
+
+        /* ── Utility ── */
+        .empty-state { color: var(--text-dim); text-align: center; padding: 20px; font-size: 12px; }
+
+        /* ── Bot Status Panels ── */
+        .bot-panel { overflow-y: auto; }
+        .bot-header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 14px; border-bottom: 1px solid var(--panel-border);
+        }
+        .bot-name { font-weight: 600; font-size: 12px; display: flex; align-items: center; gap: 8px; }
+        .bot-dot {
+            width: 7px; height: 7px; border-radius: 50%;
+            background: var(--buy-color); box-shadow: 0 0 6px var(--buy-color);
+            transition: background 0.3s, box-shadow 0.3s;
+        }
+        .bot-dot.offline { background: var(--sell-color); box-shadow: 0 0 6px var(--sell-color); }
+        .bot-badge {
+            font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 4px;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .bot-badge.long { background: var(--buy-bg); color: var(--buy-color); }
+        .bot-badge.short { background: var(--sell-bg); color: var(--sell-color); }
+        .bot-badge.flat { background: rgba(100,116,139,0.1); color: var(--text-dim); }
+        .bot-badge.offline { background: rgba(239,68,68,0.1); color: var(--sell-color); }
+        .bot-kpis {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
+            background: var(--panel-border);
+        }
+        .bot-kpi {
+            padding: 8px 14px; background: var(--panel-bg);
+            display: flex; flex-direction: column; gap: 2px;
+        }
+        .bot-kpi .label { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+        .bot-kpi .value { font-size: 13px; font-weight: 600; font-family: var(--font-mono); }
+    </style>
+</head>
+<body>
+
+<header>
+    <div class="logo">
+        <div class="logo-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5"><path d="M12 2L2 22h20L12 2z"/></svg>
+        </div>
+        SyntheticBull
+    </div>
+    <div class="header-right">
+        <div class="conn-status" id="connStatus">
+            <span class="conn-dot" id="connDot"></span>
+            <span id="pingText">Connecting...</span>
+        </div>
+        <span class="user-badge" id="userBadge">—</span>
+    </div>
+</header>
+
+<div class="layout">
+    <!-- LEFT: Markets -->
+    <div class="panel">
+        <div class="panel-title">Markets</div>
+        <div class="symbol-list" id="symbolList"></div>
+    </div>
+
+    <!-- CENTER: Chart + Order Entry + Open Orders -->
+    <div class="center-col">
+        <div class="panel chart-panel">
+            <div class="chart-header">
+                <span class="chart-symbol" id="chartTitle">—</span>
+            </div>
+            <div id="chart-container"></div>
+        </div>
+        <div class="bottom-row">
+            <!-- Order Entry -->
+            <div class="panel order-panel">
+                <div class="side-tabs">
+                    <button class="active buy" id="tabBuy" onclick="switchSide('buy')">Buy</button>
+                    <button id="tabSell" onclick="switchSide('sell')">Sell</button>
+                </div>
+                <div class="oe-field" style="border:none; padding:0; background:transparent; box-shadow:none;">
+                    <label style="width:auto;">Type</label>
+                    <select id="oeType" onchange="togglePrice()">
+                        <option value="limit">Limit</option>
+                        <option value="market">Market</option>
+                    </select>
+                </div>
+                <div class="oe-field">
+                    <label>Price</label>
+                    <input type="number" id="oePrice" placeholder="0.00" step="0.01">
+                    <span class="unit">USD</span>
+                </div>
+                <div class="oe-field">
+                    <label>Qty</label>
+                    <input type="number" id="oeQty" placeholder="0.00" step="0.01">
+                    <span class="unit" id="oeCoinSuffix">COIN</span>
+                </div>
+                <button class="btn-order" id="btnSubmit" style="background: var(--buy-color);" onclick="placeOrder()">Buy</button>
+            </div>
+            <!-- Open Orders -->
+            <div class="panel oo-panel">
+                <div class="panel-title">Open Orders</div>
+                <table class="oo-table">
+                    <thead><tr>
+                        <th>Pair</th><th>Side</th><th class="r">Price</th><th class="r">Filled</th><th class="r"></th>
+                    </tr></thead>
+                    <tbody id="openOrdersBody">
+                        <tr><td colspan="5" class="empty-state">No open orders</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- RIGHT: Orderbook + Portfolio -->
+    <div class="right-col">
+        <div class="panel ob-panel">
+            <div class="panel-title">Order Book <span class="ob-spread" id="obSpread"></span></div>
+            <div class="ob-wrap">
+                <div class="ob-hdr"><div>Price</div><div>Amount</div><div>Total</div></div>
+                <div class="ob-asks" id="obAsks"></div>
+                <div class="ob-mid">
+                    <span id="midPriceText">—</span>
+                </div>
+                <div class="ob-bids" id="obBids"></div>
+            </div>
+        </div>
+        <div class="panel pf-panel">
+            <div class="panel-title">Portfolio</div>
+            <div class="pf-grid">
+                <div class="pf-card"><span class="label">Total Value</span><span class="value" id="pfTotal">$0.00</span></div>
+                <div class="pf-card"><span class="label">Cash</span><span class="value" id="pfCash">$0.00</span></div>
+                <div class="pf-card"><span class="label">Realized PnL</span><span class="value" id="pfRealized">$0.00</span></div>
+                <div class="pf-card"><span class="label">Unrealized PnL</span><span class="value" id="pfUnrealized">$0.00</span></div>
+            </div>
+            <div class="pos-header"><span>Asset</span><span>Holdings</span><span>PnL</span></div>
+            <div class="pos-list" id="pfPositions"><div class="empty-state">No positions</div></div>
+            <div class="pos-header" style="margin-top: 8px;"><span>Trade</span><span>Size @ Price</span><span>Time</span></div>
+            <div class="pos-list" id="pfHistory"><div class="empty-state">No trade history</div></div>
+        </div>
+        <!-- Bot Status Panels -->
+        <div class="panel bot-panel">
+            <div class="panel-title">Bot Status</div>
+            <!-- Alpha Bot -->
+            <div class="bot-header">
+                <div class="bot-name"><span class="bot-dot" id="alphaDot"></span>Alpha Bot <span style="color:var(--text-dim);font-weight:400;font-size:11px">(BTC)</span></div>
+                <span class="bot-badge flat" id="alphaBadge">FLAT</span>
+            </div>
+            <div class="bot-kpis" id="alphaKpis">
+                <div class="bot-kpi"><span class="label">Equity</span><span class="value" id="alphaEquity">$100,000</span></div>
+                <div class="bot-kpi"><span class="label">PnL</span><span class="value" id="alphaPnl">$0.00</span></div>
+                <div class="bot-kpi"><span class="label">Trades</span><span class="value" id="alphaTrades">0</span></div>
+                <div class="bot-kpi"><span class="label">Win Rate</span><span class="value" id="alphaWinRate">0%</span></div>
+                <div class="bot-kpi"><span class="label">Sharpe</span><span class="value" id="alphaSharpe">0.00</span></div>
+                <div class="bot-kpi"><span class="label">Max DD</span><span class="value" id="alphaDD">0.00%</span></div>
+            </div>
+            <!-- Market Maker Bot -->
+            <div class="bot-header" style="border-top: 1px solid var(--panel-border);">
+                <div class="bot-name"><span class="bot-dot" id="mmDot"></span>Market Maker <span style="color:var(--text-dim);font-weight:400;font-size:11px">(AAPL)</span></div>
+                <span class="bot-badge flat" id="mmBadge">FLAT</span>
+            </div>
+            <div class="bot-kpis" id="mmKpis">
+                <div class="bot-kpi"><span class="label">Equity</span><span class="value" id="mmEquity">$100,000</span></div>
+                <div class="bot-kpi"><span class="label">PnL</span><span class="value" id="mmPnl">$0.00</span></div>
+                <div class="bot-kpi"><span class="label">Total Fills</span><span class="value" id="mmFills">0</span></div>
+                <div class="bot-kpi"><span class="label">Bid / Ask</span><span class="value" id="mmBidAsk">0 / 0</span></div>
+                <div class="bot-kpi"><span class="label">Fill Balance</span><span class="value" id="mmBalance">50%</span></div>
+                <div class="bot-kpi"><span class="label">Max DD</span><span class="value" id="mmDD">0.00%</span></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // ─── State ───
+    let ws, activeSymbol = "AAPL", activeSide = "buy";
+    let candlesConfig = {}, symbolPrices = {};
+    let pfState = { cash: 0, positions: {}, history: [] };
+    const SECTORS = { AAPL:'Tech', GOOGL:'Tech', MSFT:'Tech', AMZN:'Tech', TSLA:'Tech', META:'Tech', NVDA:'Tech', JPM:'Fin', BTC:'Crypto', ETH:'Crypto' };
+
+    // ─── Chart ───
+    let chart, candleSeries;
+    try {
+        chart = LightweightCharts.createChart(document.getElementById('chart-container'), {
+            layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#64748b' },
+            grid: { vertLines: { color: '#1e293b' }, horzLines: { color: '#1e293b' } },
+            crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+            rightPriceScale: { borderColor: '#1e293b' },
+            timeScale: { borderColor: '#1e293b', timeVisible: true, secondsVisible: true },
+        });
+        candleSeries = chart.addCandlestickSeries({
+            upColor: '#22c55e', downColor: '#ef4444', borderVisible: false,
+            wickUpColor: '#22c55e', wickDownColor: '#ef4444'
+        });
+        window.addEventListener('resize', () => {
+            if(chart) chart.applyOptions({ width: document.getElementById('chart-container').clientWidth, height: document.getElementById('chart-container').clientHeight });
+        });
+    } catch(e) { console.error("Chart init:", e); }
+
+    // ─── Helpers ───
+    const fmtUSD = n => new Intl.NumberFormat('en-US', { style:'currency', currency:'USD' }).format(n);
+    const fmtNum = (n, d=4) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+
+    function switchSide(side) {
+        activeSide = side;
+        const buy = document.getElementById('tabBuy'), sell = document.getElementById('tabSell'), btn = document.getElementById('btnSubmit');
+        if(side === 'buy') {
+            buy.className = 'active buy'; buy.style.color = 'white';
+            sell.className = ''; sell.style.color = '';
+            btn.style.background = 'var(--buy-color)'; btn.innerText = 'Buy ' + activeSymbol;
+        } else {
+            sell.className = 'active sell'; sell.style.color = 'white';
+            buy.className = ''; buy.style.color = '';
+            btn.style.background = 'var(--sell-color)'; btn.innerText = 'Sell ' + activeSymbol;
+        }
+    }
+
+    function togglePrice() {
+        const t = document.getElementById('oeType').value;
+        document.getElementById('oePrice').disabled = (t === 'market');
+        if(t === 'market') document.getElementById('oePrice').value = '';
+    }
+
+    function switchSymbol(sym) {
+        activeSymbol = sym;
+        document.getElementById('chartTitle').innerText = sym;
+        document.getElementById('oeCoinSuffix').innerText = sym;
+        switchSide(activeSide);
+        document.querySelectorAll('.sym-item').forEach(el => {
+            el.classList.toggle('active', el.dataset.sym === sym);
+        });
+        if(candlesConfig[sym] && candleSeries) {
+            let data = Array.from(candlesConfig[sym].values()).sort((a,b) => a.time - b.time);
+            try { candleSeries.setData(data); } catch(e) {}
+        }
+        if(symbolPrices[sym]) document.getElementById('oePrice').value = symbolPrices[sym];
+    }
+
+    function placeOrder() {
+        const type = document.getElementById('oeType').value;
+        const qty = parseFloat(document.getElementById('oeQty').value);
+        const price = parseFloat(document.getElementById('oePrice').value);
+        if(!qty) return alert("Enter quantity");
+        let req = { type: "place_order", symbol: activeSymbol, order_type: type, side: activeSide, qty };
+        if(type === 'limit') { if(!price) return alert("Enter price"); req.price = price; }
+        ws.send(JSON.stringify(req));
+        const btn = document.getElementById('btnSubmit');
+        btn.style.filter = 'brightness(1.5)';
+        setTimeout(() => btn.style.filter = '', 200);
+    }
+
+    function cancelOrder(sym, oid) {
+        ws.send(JSON.stringify({ type: "cancel_order", symbol: sym, order_id: oid }));
+    }
+
+    // ─── Renderers ───
+    function renderOrderBook(msg) {
+        const mid = document.getElementById('midPriceText');
+        const oldP = parseFloat(mid.innerText.replace(/,/g, ''));
+        if(!isNaN(oldP) && msg.mid !== oldP) {
+            mid.style.color = msg.mid > oldP ? 'var(--buy-color)' : 'var(--sell-color)';
+        }
+        symbolPrices[msg.symbol] = msg.mid;
+        const sb = document.getElementById('price-' + msg.symbol);
+        if(sb) sb.innerText = fmtNum(msg.mid, 2);
+        updatePortfolioUI();
+        if(msg.symbol !== activeSymbol) return;
+        mid.innerText = fmtNum(msg.mid, 2);
+        document.getElementById('obSpread').innerText = 'Spread: ' + fmtNum(msg.spread, 2);
+
+        const tA = msg.asks.reduce((s,v) => s+v[1], 0);
+        const tB = msg.bids.reduce((s,v) => s+v[1], 0);
+        const mx = Math.max(tA, tB, 0.0001);
+
+        // Asks (top 5)
+        let top5A = (msg.asks||[]).slice(0,5), cumA = [], c = 0;
+        for(let i=0;i<top5A.length;i++){c+=top5A[i][1]; cumA.push(c);}
+        let aR = top5A.reverse(), cR = cumA.reverse();
+        document.getElementById('obAsks').innerHTML = aR.map((a,i) => {
+            let p = (cR[i]/mx)*100;
+            return `<div class="ob-row" onclick="document.getElementById('oePrice').value='${fmtNum(a[0],2)}'">
+                <div class="ob-bar" style="background:var(--sell-color);width:${p}%"></div>
+                <div>${fmtNum(a[0],2)}</div><div>${fmtNum(a[1],4)}</div><div>${fmtNum(cR[i],4)}</div>
+            </div>`;
+        }).join('');
+
+        // Bids (top 5)
+        let top5B = (msg.bids||[]).slice(0,5), cumB = 0;
+        document.getElementById('obBids').innerHTML = top5B.map(b => {
+            cumB += b[1]; let p = (cumB/mx)*100;
+            return `<div class="ob-row" onclick="document.getElementById('oePrice').value='${fmtNum(b[0],2)}'">
+                <div class="ob-bar" style="background:var(--buy-color);width:${p}%"></div>
+                <div>${fmtNum(b[0],2)}</div><div>${fmtNum(b[1],4)}</div><div>${fmtNum(cumB,4)}</div>
+            </div>`;
+        }).join('');
+    }
+
+    function renderPortfolio(msg) {
+        pfState.cash = msg.cash;
+        pfState.positions = msg.positions;
+        if(msg.history) pfState.history = msg.history;
+        updatePortfolioUI();
+    }
+
+    function updatePortfolioUI() {
+        let uPnl = 0, rPnl = 0, hVal = 0, html = '';
+        for(let sym in pfState.positions) {
+            const p = pfState.positions[sym];
+            const mid = symbolPrices[sym] || p.avg_cost;
+            const unr = p.holdings * (mid - p.avg_cost);
+            hVal += p.holdings * mid;
+            uPnl += unr; rPnl += p.realized_pnl;
+            const col = unr >= 0 ? 'var(--buy-color)' : 'var(--sell-color)';
+            html += `<div class="pos-row">
+                <span style="font-weight:600;color:var(--text-main)">${sym}</span>
+                <span>${fmtNum(p.holdings,4)} @ ${fmtNum(p.avg_cost,2)}</span>
+                <span style="color:${col}">${fmtUSD(unr)}</span>
+            </div>`;
+        }
+        document.getElementById('pfCash').innerText = fmtUSD(pfState.cash);
+        document.getElementById('pfTotal').innerText = fmtUSD(pfState.cash + hVal);
+        const upEl = document.getElementById('pfUnrealized');
+        upEl.innerText = fmtUSD(uPnl); upEl.style.color = uPnl >= 0 ? 'var(--buy-color)' : 'var(--sell-color)';
+        const rpEl = document.getElementById('pfRealized');
+        rpEl.innerText = fmtUSD(rPnl); rpEl.style.color = rPnl >= 0 ? 'var(--buy-color)' : 'var(--sell-color)';
+        document.getElementById('pfPositions').innerHTML = html || '<div class="empty-state">No positions</div>';
+
+        let histHtml = '';
+        let aggHist = [];
+        if (pfState.history) {
+            // 1. Remove any duplicate trades received from both streams
+            let uniqueHist = [];
+            let seen = new Set();
+            for (let t of pfState.history) {
+                if(!seen.has(t.id)) { seen.add(t.id); uniqueHist.push(t); }
+            }
+            pfState.history = uniqueHist;
+
+            // 2. Aggregate "partial fills" (trades happening in the exact same moment)
+            for(let t of pfState.history) {
+                let last = aggHist[aggHist.length - 1];
+                // Group them if they have the same symbol, side, and happened within 100ms
+                if (last && last.symbol === t.symbol && last.side === t.side && Math.abs(last.ts - t.ts) < 100000) {
+                    let totalCost = (last.price * last.qty) + (t.price * t.qty);
+                    last.qty += t.qty;
+                    last.price = totalCost / last.qty; // Calculate average fill price
+                } else {
+                    aggHist.push({...t});
+                }
+            }
+            
+            // 3. Render the grouped history
+            for(let t of aggHist) {
+                let color = t.side === 'buy' ? 'var(--buy-color)' : 'var(--sell-color)';
+                let ts = new Date(t.ts / 1000).toLocaleTimeString();
+                histHtml += `<div class="pos-row">
+                    <span style="font-weight:600;color:${color}">${t.side.toUpperCase()} ${t.symbol}</span>
+                    <span>${fmtNum(t.qty,4)} @ ${fmtNum(t.price,2)}</span>
+                    <span style="color:var(--text-muted)">${ts}</span>
+                </div>`;
+            }
+        }
+        document.getElementById('pfHistory').innerHTML = histHtml || '<div class="empty-state">No trade history</div>';
+    }
+
+    function renderOpenOrders(msg) {
+        if(!msg.orders.length) {
+            document.getElementById('openOrdersBody').innerHTML = '<tr><td colspan="5" class="empty-state">No open orders</td></tr>';
+            return;
+        }
+        document.getElementById('openOrdersBody').innerHTML = msg.orders.map(o => {
+            const col = o.side === 'buy' ? 'var(--buy-color)' : 'var(--sell-color)';
+            return `<tr>
+                <td style="font-weight:600">${o.symbol}</td>
+                <td style="color:${col}">${o.side.toUpperCase()}</td>
+                <td class="r">${fmtNum(o.price,2)}</td>
+                <td class="r">${fmtNum(o.remaining_qty,4)}/${fmtNum(o.orig_qty,4)}</td>
+                <td class="r"><button class="btn-cancel" onclick="cancelOrder('${o.symbol}',${o.order_id})">Cancel</button></td>
+            </tr>`;
+        }).join('');
+    }
+
+    // ─── WebSocket ───
+    let pingInterval, lastPing = 0;
+    function connect() {
+        try {
+            ws = new WebSocket("ws://127.0.0.1:9001");
+            ws.onerror = () => {
+                document.getElementById('pingText').innerText = "Connection Error";
+                document.getElementById('connDot').style.background = 'var(--sell-color)';
+            };
+            ws.onopen = () => {
+                document.getElementById('connDot').style.background = 'var(--buy-color)';
+                document.getElementById('pingText').innerText = 'Connected';
+                pingInterval = setInterval(() => { lastPing = Date.now(); ws.send(JSON.stringify({type:"ping"})); }, 5000);
+            };
+            ws.onmessage = e => {
+                const msg = JSON.parse(e.data);
+                if(msg.type === 'welcome') {
+                    document.getElementById('userBadge').innerText = msg.user_id;
+                    let html = '';
+                    msg.symbols.forEach(s => {
+                        candlesConfig[s.symbol] = new Map();
+                        const sec = SECTORS[s.symbol] || '';
+                        html += `<div class="sym-item" data-sym="${s.symbol}" onclick="switchSymbol('${s.symbol}')">
+                            <div class="sym-info"><span class="sym-name">${s.symbol}</span><span class="sym-sector">${sec}</span></div>
+                            <span class="sym-price" id="price-${s.symbol}">${fmtNum(s.price,2)}</span>
+                        </div>`;
+                    });
+                    document.getElementById('symbolList').innerHTML = html;
+                    if(msg.symbols.length) switchSymbol(msg.symbols[0].symbol);
+                }
+                else if(msg.type === 'orderbook') renderOrderBook(msg);
+                else if(msg.type === 'candle') {
+                    const t = Math.floor(msg.t/1000);
+                    const c = { time:t, open:msg.o, high:msg.h, low:msg.l, close:msg.c };
+                    if(!candlesConfig[msg.symbol]) candlesConfig[msg.symbol] = new Map();
+                    candlesConfig[msg.symbol].set(t, c);
+                    if(msg.symbol === activeSymbol && candleSeries) try { candleSeries.update(c); } catch(e) {}
+                }
+                else if(msg.type === 'portfolio') renderPortfolio(msg);
+                else if(msg.type === 'trade') {
+                    let uid = document.getElementById('userBadge').innerText;
+                    if (msg.buyer === uid || msg.seller === uid) {
+                        let side = msg.buyer === uid ? 'buy' : 'sell';
+                        msg.side = side;
+                        if (!pfState.history) pfState.history = [];
+                        if (!pfState.history.some(t => t.id === msg.id)) {
+                            pfState.history.unshift(msg); 
+                            updatePortfolioUI();
+                        }
+                    }
+                }
+                else if(msg.type === 'open_orders') renderOpenOrders(msg);
+                else if(msg.type === 'pong') {
+                    const lat = Date.now() - lastPing;
+                    document.getElementById('pingText').innerText = lat + 'ms';
+                }
+                else if(msg.type === 'error') alert("Error: " + msg.message);
+            };
+            ws.onclose = () => {
+                document.getElementById('pingText').innerText = 'Reconnecting...';
+                document.getElementById('connDot').style.background = 'var(--sell-color)';
+                setTimeout(connect, 2000);
+            };
+        } catch(e) { setTimeout(connect, 2000); }
+    }
+    connect();
+
+    // ─── Bot Status Polling ───
+    function setBotBadge(id, pos) {
+        const el = document.getElementById(id);
+        const p = (pos || 'FLAT').toUpperCase();
+        el.innerText = p;
+        el.className = 'bot-badge ' + (p === 'LONG' ? 'long' : p === 'SHORT' ? 'short' : 'flat');
+    }
+    function pnlColor(val) { return val >= 0 ? 'var(--buy-color)' : 'var(--sell-color)'; }
+
+    async function pollAlphaBot() {
+        try {
+            const res = await fetch('http://127.0.0.1:3001/bot/status', {signal: AbortSignal.timeout(1500)});
+            const d = await res.json();
+            document.getElementById('alphaDot').className = 'bot-dot';
+            document.getElementById('alphaEquity').innerText = fmtUSD(d.equity || 100000);
+            const pnl = d.pnl || 0;
+            const pnlEl = document.getElementById('alphaPnl');
+            pnlEl.innerText = fmtUSD(pnl); pnlEl.style.color = pnlColor(pnl);
+            document.getElementById('alphaTrades').innerText = d.trades || 0;
+            document.getElementById('alphaWinRate').innerText = ((d.winRate || 0) * 100).toFixed(1) + '%';
+            document.getElementById('alphaSharpe').innerText = (d.sharpe || 0).toFixed(2);
+            document.getElementById('alphaDD').innerText = ((d.maxDrawdown || 0) * 100).toFixed(2) + '%';
+            setBotBadge('alphaBadge', d.position);
+        } catch(e) {
+            document.getElementById('alphaDot').className = 'bot-dot offline';
+            setBotBadge('alphaBadge', 'offline');
+            document.getElementById('alphaBadge').className = 'bot-badge offline';
+        }
+    }
+
+    async function pollMMBot() {
+        try {
+            const res = await fetch('http://127.0.0.1:3002/bot/status', {signal: AbortSignal.timeout(1500)});
+            const d = await res.json();
+            document.getElementById('mmDot').className = 'bot-dot';
+            document.getElementById('mmEquity').innerText = fmtUSD(d.equity || 100000);
+            const pnl = d.pnl || 0;
+            const pnlEl = document.getElementById('mmPnl');
+            pnlEl.innerText = fmtUSD(pnl); pnlEl.style.color = pnlColor(pnl);
+            document.getElementById('mmFills').innerText = d.totalFills || 0;
+            document.getElementById('mmBidAsk').innerText = (d.bidFills || 0) + ' / ' + (d.askFills || 0);
+            document.getElementById('mmBalance').innerText = ((d.fillBalance || 0.5) * 100).toFixed(1) + '%';
+            document.getElementById('mmDD').innerText = ((d.maxDrawdown || 0) * 100).toFixed(2) + '%';
+            setBotBadge('mmBadge', d.position);
+        } catch(e) {
+            document.getElementById('mmDot').className = 'bot-dot offline';
+            setBotBadge('mmBadge', 'offline');
+            document.getElementById('mmBadge').className = 'bot-badge offline';
+        }
+    }
+
+    setInterval(() => { pollAlphaBot(); pollMMBot(); }, 2000);
+    setTimeout(() => { pollAlphaBot(); pollMMBot(); }, 500);
+</script>
+</body>
+</html>
