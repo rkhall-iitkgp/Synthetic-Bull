@@ -7,6 +7,8 @@ from shared.config import MM_BOT_PORT
 _state: dict = {
     "equity": 100000.0,
     "pnl": 0.0,
+    "realizedPnl": 0.0,
+    "unrealizedPnl": 0.0,
     "position": "FLAT",
     "holdings": 0.0,
     "totalFills": 0,
@@ -14,6 +16,7 @@ _state: dict = {
     "askFills": 0,
     "fillBalance": 0.5,
     "maxDrawdown": 0.0,
+    "halted": False,
 }
 
 app = FastAPI(title="Market Maker Bot Status")

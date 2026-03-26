@@ -13,18 +13,23 @@ class TradeRecord:
     reason: str
     pnl: float
     pct_return: float
+    side: str = "long"
 
 
 class KPITracker:
     def __init__(self):
         self._trades: list[TradeRecord] = []
         self._equity_curve: list[float] = [STARTING_EQUITY]
+        self._realized_pnl: float = 0.0
 
-    def record_trade(self, entry, exit_price, qty, reason, new_equity):
+    def record_trade(self, entry, exit_price, qty, reason, new_equity, side: str = "long"):
         entry = float(entry)
         exit_price = float(exit_price)
         qty = float(qty)
-        pnl = (exit_price - entry) * qty
+        if side == "long":
+            pnl = (exit_price - entry) * qty
+        else:
+            pnl = (entry - exit_price) * qty
         pct_return = 0.0 if entry == 0 else (exit_price - entry) / entry
         self._trades.append(
             TradeRecord(
@@ -34,8 +39,10 @@ class KPITracker:
                 reason=str(reason),
                 pnl=float(pnl),
                 pct_return=float(pct_return),
+                side=side,
             )
         )
+        self._realized_pnl += float(pnl)
         self._equity_curve.append(float(new_equity))
 
     def total_trades(self) -> int:
@@ -43,6 +50,9 @@ class KPITracker:
 
     def total_pnl(self) -> float:
         return float(sum(t.pnl for t in self._trades))
+
+    def realized_pnl(self) -> float:
+        return self._realized_pnl
 
     def win_rate(self) -> float:
         if not self._trades:
@@ -73,9 +83,12 @@ class KPITracker:
         return float(max_dd)
 
     def get_status(self, current_equity: float, position: str) -> dict:
+        unrealized = float(current_equity) - STARTING_EQUITY - self._realized_pnl
         return {
             "equity": round(float(current_equity), 2),
             "pnl": round(float(current_equity) - STARTING_EQUITY, 2),
+            "realizedPnl": round(self._realized_pnl, 2),
+            "unrealizedPnl": round(unrealized, 2),
             "position": position,
             "trades": self.total_trades(),
             "winRate": self.win_rate(),

@@ -9,27 +9,23 @@ from shared.config import EXCHANGE_WS_URL
 
 class ExchangeClient:
     """
-    Manages one persistent WebSocket connection to ws://localhost:9001.
-
-    Usage:
-        client = ExchangeClient(on_message=my_handler)
-        await client.run()          # blocks forever, reconnects on drop
-
-    Sending:
-        await client.send({"type": "place_order", ...})
-        await client.cancel(order_id: int)
-        await client.ping()
-
-    The on_message coroutine receives one parsed dict per message.
+    Manages one persistent WebSocket connection to the exchange.
+    Supports an on_reconnect callback for cancel-all-on-reconnect patterns.
     """
 
-    def __init__(self, on_message: Callable[[dict], Awaitable[None]]):
+    def __init__(
+        self,
+        on_message: Callable[[dict], Awaitable[None]],
+        on_reconnect: Callable[[], Awaitable[None]] | None = None,
+    ):
         self.on_message = on_message
+        self.on_reconnect = on_reconnect
         self.user_id: str | None = None
         self._symbol_prices: dict[str, float] = {}
         self._ws = None
         self._send_queue: asyncio.Queue = asyncio.Queue()
         self._connected = asyncio.Event()
+        self._first_connect = True
 
     async def run(self):
         """Connect loop with exponential backoff. Never returns."""
@@ -40,7 +36,18 @@ class ExchangeClient:
                     self._ws = ws
                     self._connected.set()
                     backoff = 1
+
+                    is_reconnect = not self._first_connect
+                    self._first_connect = False
+
                     print(f"[ExchangeClient] Connected to {EXCHANGE_WS_URL}")
+
+                    if is_reconnect and self.on_reconnect:
+                        try:
+                            await self.on_reconnect()
+                        except Exception as e:
+                            print(f"[ExchangeClient] Reconnect handler error: {e}")
+
                     await asyncio.gather(
                         self._recv_loop(ws),
                         self._send_loop(ws),

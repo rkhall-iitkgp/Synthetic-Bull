@@ -27,6 +27,9 @@ def ema_vote(prices: list[float]) -> float:
 
 
 def rsi_vote(prices: list[float]) -> float:
+    """RSI with configurable period (default 50 for 1-second candles).
+    Longer period smooths out the noise that makes RSI-14 useless on fast data.
+    """
     if len(prices) < RSI_PERIOD + 1:
         return 0.0
 
@@ -49,6 +52,31 @@ def rsi_vote(prices: list[float]) -> float:
         rsi = 100.0 - (100.0 / (1.0 + rs))
 
     vote = (50.0 - rsi) / 50.0
+    return _clamp(float(vote))
+
+
+def price_deviation_vote(prices: list[float]) -> float:
+    """Price deviation from slow EMA — a mean-reversion signal.
+    When price is far above the slow EMA, vote sell; far below, vote buy.
+    This replaces the noisy RSI-14 with a more stable signal.
+    """
+    slow_period = 100
+    if len(prices) < slow_period:
+        return 0.0
+
+    arr = np.asarray(prices, dtype=float)
+    slow_ema = _ema(arr, slow_period)
+    current = float(arr[-1])
+    ema_val = float(slow_ema[-1])
+
+    if ema_val == 0.0:
+        return 0.0
+
+    # Percentage deviation from slow EMA
+    deviation = (current - ema_val) / ema_val
+
+    # Scale: 1% deviation => full vote
+    vote = -deviation / 0.01
     return _clamp(float(vote))
 
 
@@ -93,4 +121,5 @@ class IndicatorEngine:
             "rsi": rsi_vote(prices),
             "macd": macd_vote(prices),
             "bollinger": bollinger_vote(prices),
+            "price_deviation": price_deviation_vote(prices),
         }

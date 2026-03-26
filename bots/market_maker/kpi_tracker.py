@@ -9,6 +9,7 @@ class MMKPITracker:
         self.ask_fills: int = 0
         self.equity_curve: list[float] = [STARTING_EQUITY]
         self._peak: float = STARTING_EQUITY
+        self._realized_pnl: float = 0.0
 
     def on_fill(self, side: str, fill_price: float, qty: float, spread_captured: float):
         self.total_fills += 1
@@ -22,6 +23,8 @@ class MMKPITracker:
         self.equity_curve.append(float(equity))
         if equity > self._peak:
             self._peak = float(equity)
+        # Realized PnL approximated from equity curve
+        self._realized_pnl = float(equity) - STARTING_EQUITY
 
     def max_drawdown(self) -> float:
         peak = self.equity_curve[0]
@@ -41,9 +44,13 @@ class MMKPITracker:
         return self.bid_fills / self.total_fills
 
     def get_status(self, current_equity: float, holdings: float) -> dict:
+        realized_pnl = self._realized_pnl
+        unrealized_pnl = float(current_equity) - STARTING_EQUITY - realized_pnl
         return {
             "equity": round(float(current_equity), 2),
             "pnl": round(float(current_equity) - STARTING_EQUITY, 2),
+            "realizedPnl": round(realized_pnl, 2),
+            "unrealizedPnl": round(unrealized_pnl, 2),
             "position": "LONG"
             if holdings > 0.001
             else "SHORT"

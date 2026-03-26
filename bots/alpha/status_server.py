@@ -7,11 +7,14 @@ from shared.config import ALPHA_BOT_PORT
 _state: dict = {
     "equity": 100000.0,
     "pnl": 0.0,
+    "realizedPnl": 0.0,
+    "unrealizedPnl": 0.0,
     "position": "FLAT",
     "trades": 0,
     "winRate": 0.0,
     "sharpe": 0.0,
     "maxDrawdown": 0.0,
+    "halted": False,
 }
 
 app = FastAPI(title="Alpha Bot Status")

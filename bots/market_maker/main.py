@@ -3,6 +3,12 @@ Market Maker Bot - main event loop.
 
 Run with:
     python -m market_maker.main
+
+Key profitability improvements:
+  - Cancel-then-place requote with minimal delay
+  - PnL floor halt at $80k
+  - Cancel-all-open-orders on reconnect
+  - Aggressive spread widening at high inventory
 """
 
 import asyncio
@@ -13,14 +19,17 @@ from market_maker.order_tracker import OrderTracker
 from market_maker.spread_calculator import SpreadCalculator
 from market_maker.status_server import run as run_status_server
 from market_maker.status_server import update_status
-from shared.config import MM_REQUOTE_INTERVAL, MM_SYMBOL, STARTING_EQUITY
+from shared.config import MM_REQUOTE_INTERVAL, MM_SYMBOL, PNL_FLOOR, STARTING_EQUITY
 from shared.exchange_client import ExchangeClient
 
 
 class MarketMakerBot:
     def __init__(self):
         self.symbol: str = MM_SYMBOL
-        self.client = ExchangeClient(on_message=self._handle_message)
+        self.client = ExchangeClient(
+            on_message=self._handle_message,
+            on_reconnect=self._on_reconnect,
+        )
         self.inventory = InventoryManager(symbol=MM_SYMBOL)
         self.spread = SpreadCalculator()
         self.tracker = OrderTracker()
@@ -28,6 +37,8 @@ class MarketMakerBot:
         self.latest_mid: float = 0.0
         self.last_mid_quoted: float = 0.0
         self._requote_lock: asyncio.Lock = asyncio.Lock()
+        self._halted: bool = False
+        self._initial_sync_done: bool = False
 
     async def run(self):
         await asyncio.gather(
@@ -36,9 +47,22 @@ class MarketMakerBot:
             run_status_server(),
         )
 
+    async def _on_reconnect(self):
+        """Cancel all known orders on reconnect to prevent orphaned positions."""
+        print("[MMBot] Reconnect detected — cancelling all tracked orders")
+        for oid in self.tracker.get_all_ids():
+            await self.client.cancel(self.symbol, oid)
+        self.tracker.clear()
+        self.last_mid_quoted = 0.0
+        self._initial_sync_done = False
+
     async def _requote_loop(self):
         await self.client.wait_until_connected()
-        await asyncio.sleep(1.0)
+        # Wait for the first orderbook to arrive (server replays ~1800 candles first)
+        print(f"[MMBot] Waiting for first {self.symbol} orderbook...")
+        while self.latest_mid == 0.0:
+            await asyncio.sleep(0.5)
+        print(f"[MMBot] Got first {self.symbol} mid={self.latest_mid:.2f} — starting requote loop")
         while True:
             await asyncio.sleep(MM_REQUOTE_INTERVAL)
             await self._do_requote()
@@ -49,18 +73,31 @@ class MarketMakerBot:
                 return
             if self.tracker.has_pending():
                 return
+            if self._halted:
+                return
 
-            for oid in self.tracker.get_all_ids():
+            # CANCEL old orders first
+            old_ids = self.tracker.get_all_ids()
+            for oid in old_ids:
                 await self.client.cancel(self.symbol, oid)
 
-            await asyncio.sleep(0.05)
+            # Brief pause for cancels to process
+            await asyncio.sleep(0.03)
             self.tracker.clear()
 
+            # PLACE new orders
             skew = self.inventory.skew_factor()
             is_too_long = self.inventory.is_too_long()
             is_too_short = self.inventory.is_too_short()
 
             quotes = self.spread.compute(self.latest_mid, skew, is_too_long, is_too_short)
+
+            print(
+                f"[MMBot] Requote: mid={self.latest_mid:.2f} skew={skew:.2f} "
+                f"bid={quotes['bid_price']:.2f}x{quotes['bid_qty']:.4f} "
+                f"ask={quotes['ask_price']:.2f}x{quotes['ask_qty']:.4f} "
+                f"cancelled={len(old_ids)}"
+            )
 
             if not is_too_long:
                 await self.client.place_limit(
@@ -82,6 +119,17 @@ class MarketMakerBot:
 
             self.last_mid_quoted = self.latest_mid
 
+    def _check_pnl_floor(self):
+        """Halt all trading if portfolio drops below the PnL floor."""
+        if self._halted:
+            return
+        if self.inventory.total_val < PNL_FLOOR:
+            self._halted = True
+            print(
+                f"[MMBot] ⚠ PNL FLOOR HIT — portfolio ${self.inventory.total_val:.2f} "
+                f"< floor ${PNL_FLOOR:.2f}. Halting all new orders."
+            )
+
     async def _handle_message(self, msg: dict):
         t = msg.get("type")
 
@@ -92,11 +140,15 @@ class MarketMakerBot:
         if t == "portfolio":
             self.inventory.on_portfolio_update(msg)
             self.kpi.record_equity(msg["total_value"])
+            self._check_pnl_floor()
             self._update_status()
             return
 
         if t == "open_orders":
-            await self._on_open_orders(msg)
+            # Only process open_orders ONCE on initial connect
+            if not self._initial_sync_done:
+                self._initial_sync_done = True
+                await self._on_open_orders(msg)
             return
 
         if t == "error":
@@ -127,12 +179,15 @@ class MarketMakerBot:
 
     async def _on_open_orders(self, msg: dict):
         orders = msg.get("orders", [])
-        self.tracker.clear()
-        for o in orders:
-            if o.get("symbol") != self.symbol:
-                continue
-            self.tracker.on_ack(o["order_id"])
-            print(f"[MMBot] Restored order {o['order_id']} {o['side']} @ {o['price']} from open_orders")
+        my_orders = [o for o in orders if o.get("symbol") == self.symbol]
+
+        if my_orders:
+            self.tracker.clear()
+            for o in my_orders:
+                self.tracker.on_ack(o["order_id"])
+            print(f"[MMBot] Synced {len(my_orders)} existing orders from open_orders")
+        else:
+            print("[MMBot] No existing orders to restore")
 
     def _reset_for_new_session(self):
         self.inventory = InventoryManager(symbol=self.symbol)
@@ -140,6 +195,8 @@ class MarketMakerBot:
         self.kpi = MMKPITracker()
         self.latest_mid = 0.0
         self.last_mid_quoted = 0.0
+        self._halted = False
+        self._initial_sync_done = False
         self.kpi.record_equity(STARTING_EQUITY)
         self._update_status()
 
@@ -157,7 +214,9 @@ class MarketMakerBot:
             self.kpi.on_fill("ask", price, qty, 0.0)
 
     def _update_status(self):
-        update_status(self.kpi.get_status(self.inventory.total_val, self.inventory.holdings))
+        status = self.kpi.get_status(self.inventory.total_val, self.inventory.holdings)
+        status["halted"] = self._halted
+        update_status(status)
 
 
 async def main():

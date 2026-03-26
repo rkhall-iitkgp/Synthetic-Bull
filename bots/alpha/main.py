@@ -3,6 +3,14 @@ Alpha Bot - main event loop.
 
 Run with:
     python -m alpha.main
+
+Key profitability improvements:
+  - Warmup gate: blocks signals until 100 candles buffered
+  - PnL floor halt at $80k
+  - 15-second post-trade cooldown
+  - 20% hard position cap per trade
+  - RSI-50 + price-deviation indicator for stable signals
+  - Cancel-all on reconnect
 """
 
 import asyncio
@@ -22,7 +30,10 @@ from shared.exchange_client import ExchangeClient
 class AlphaBot:
     def __init__(self):
         self.symbol: str = ALPHA_SYMBOL
-        self.client = ExchangeClient(on_message=self._handle_message)
+        self.client = ExchangeClient(
+            on_message=self._handle_message,
+            on_reconnect=self._on_reconnect,
+        )
         self.buffer = TickBuffer()
         self.indicators = IndicatorEngine()
         self.scorer = SignalScorer()
@@ -39,12 +50,23 @@ class AlphaBot:
         self._pending_entry_price: float = 0.0
         self._pending_entry_side: str = "long"
         self._candle_count: int = 0
+        self._warmup_logged: bool = False
+        self._initial_sync_done: bool = False
 
     async def run(self):
         await asyncio.gather(
             self.client.run(),
             run_status_server(),
         )
+
+    async def _on_reconnect(self):
+        """Cancel all known orders on reconnect."""
+        print("[AlphaBot] Reconnect detected — cancelling TP order if any")
+        if self.pending_tp_order_id is not None:
+            await self.client.cancel(self.symbol, self.pending_tp_order_id)
+            self.pending_tp_order_id = None
+        self._waiting_for_entry_ack = False
+        self._waiting_for_tp_ack = False
 
     async def _handle_message(self, msg: dict):
         t = msg.get("type")
@@ -59,7 +81,9 @@ class AlphaBot:
             return
 
         if t == "open_orders":
-            await self._on_open_orders(msg)
+            if not self._initial_sync_done:
+                self._initial_sync_done = True
+                await self._on_open_orders(msg)
             return
 
         if t == "error":
@@ -94,7 +118,6 @@ class AlphaBot:
         for o in orders:
             if o.get("symbol") != self.symbol:
                 continue
-            # Restore TP orders: sell TP for longs, buy TP for shorts
             if self.pending_tp_order_id is None:
                 if o.get("side") == "sell" or o.get("side") == "buy":
                     self.pending_tp_order_id = o["order_id"]
@@ -117,6 +140,8 @@ class AlphaBot:
         self._pending_entry_price = 0.0
         self._pending_entry_side = "long"
         self._candle_count = 0
+        self._warmup_logged = False
+        self._initial_sync_done = False
         self._update_status()
 
     async def _on_candle(self, msg: dict):
@@ -129,10 +154,27 @@ class AlphaBot:
         self.risk.tick()
         self._candle_count += 1
 
+        # WARMUP GATE: block all signals until we have enough data
+        if not self.buffer.is_ready():
+            if not self._warmup_logged and self._candle_count % 20 == 0:
+                print(f"[AlphaBot] Warming up: {self.buffer.size()}/100 candles")
+            return
+
+        if not self._warmup_logged:
+            self._warmup_logged = True
+            print(f"[AlphaBot] Warmup complete — {self.buffer.size()} candles buffered, signals active")
+
         total_val = self.risk.get_equity()
         circuit_fired = self.drawdown.tick(total_val)
         if circuit_fired:
             await self._emergency_exit("CIRCUIT_BREAKER")
+            return
+
+        # PnL floor check
+        if self.risk.is_pnl_floor_hit():
+            if not self.risk.is_flat():
+                await self._emergency_exit("PNL_FLOOR")
+            self._update_status()
             return
 
         if not self.risk.is_flat():
@@ -140,7 +182,7 @@ class AlphaBot:
             self._update_status()
             return
 
-        if self.buffer.is_ready() and not self.drawdown.is_halted():
+        if not self.drawdown.is_halted():
             await self._check_entry(close_price)
 
         self._update_status()
@@ -162,19 +204,19 @@ class AlphaBot:
 
         await self._cancel_tp_if_any()
 
-        # Exit direction depends on position side
         if position.side == "long":
             await self.client.place_market(self.symbol, "sell", position.quantity)
         else:
             await self.client.place_market(self.symbol, "buy", position.quantity)
 
-        self.risk.close_position(self.latest_mid, "STOP_LOSS")
+        pnl = self.risk.close_position(self.latest_mid, "STOP_LOSS")
         self.kpi.record_trade(
             position.entry_price,
             self.latest_mid,
             position.quantity,
             "STOP_LOSS",
             self.risk.get_equity(),
+            side=position.side,
         )
 
     async def _check_signal_reversal(self, price: float):
@@ -192,19 +234,19 @@ class AlphaBot:
 
         await self._cancel_tp_if_any()
 
-        # Exit direction depends on position side
         if position.side == "long":
             await self.client.place_market(self.symbol, "sell", position.quantity)
         else:
             await self.client.place_market(self.symbol, "buy", position.quantity)
 
-        self.risk.close_position(price, "SIGNAL_REVERSAL")
+        pnl = self.risk.close_position(price, "SIGNAL_REVERSAL")
         self.kpi.record_trade(
             position.entry_price,
             price,
             position.quantity,
             "SIGNAL_REVERSAL",
             self.risk.get_equity(),
+            side=position.side,
         )
 
     async def _check_entry(self, price: float):
@@ -217,7 +259,8 @@ class AlphaBot:
                 f"[AlphaBot] {self.symbol} score={signal['score']:.3f} "
                 f"decision={signal['decision']} confidence={signal['confidence']:.2f} "
                 f"votes={{ema:{votes['ema']:.2f} rsi:{votes['rsi']:.2f} "
-                f"macd:{votes['macd']:.2f} bb:{votes['bollinger']:.2f}}} "
+                f"macd:{votes['macd']:.2f} bb:{votes['bollinger']:.2f} "
+                f"pdev:{votes['price_deviation']:.2f}}} "
                 f"cooldown={self.risk.cooldown} mid={price:.2f}"
             )
 
@@ -290,7 +333,7 @@ class AlphaBot:
             self.pending_tp_order_id = None
             return
 
-        # Detect our TP fill: for longs we are the seller, for shorts we are the buyer
+        # Detect our TP fill
         if position.side == "long":
             if msg.get("seller") != self.client.user_id:
                 return
@@ -306,6 +349,7 @@ class AlphaBot:
             position.quantity,
             "TAKE_PROFIT",
             self.risk.get_equity(),
+            side=position.side,
         )
         self.pending_tp_order_id = None
 
@@ -319,7 +363,6 @@ class AlphaBot:
 
         await self._cancel_tp_if_any()
 
-        # Exit in the opposite direction
         if position.side == "long":
             await self.client.place_market(self.symbol, "sell", position.quantity)
         else:
@@ -333,6 +376,7 @@ class AlphaBot:
             position.quantity,
             reason,
             self.risk.get_equity(),
+            side=position.side,
         )
 
     def _total_value(self) -> float:
@@ -343,7 +387,9 @@ class AlphaBot:
         position = self.risk.get_position()
         if position:
             pos = position.side.upper()
-        update_status(self.kpi.get_status(self.risk.get_equity(), pos))
+        status = self.kpi.get_status(self.risk.get_equity(), pos)
+        status["halted"] = self.risk.is_pnl_floor_hit() or self.drawdown.is_halted()
+        update_status(status)
 
 
 async def main():

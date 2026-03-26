@@ -2,9 +2,11 @@ from dataclasses import dataclass
 
 from shared.config import (
     ALPHA_COOLDOWN_TICKS,
+    ALPHA_MAX_POSITION_PCT,
     ALPHA_RISK_PCT,
     ALPHA_STOP_PCT,
     ALPHA_TP_PCT,
+    PNL_FLOOR,
     STARTING_EQUITY,
 )
 
@@ -28,6 +30,7 @@ class RiskManager:
         self._server_holdings: float = 0.0
         self._server_avg_cost: float = 0.0
         self._server_unreal_pnl: float = 0.0
+        self._pnl_floor_hit: bool = False
 
     def on_portfolio_update(self, msg: dict):
         self.equity = float(msg.get("total_value", self.equity))
@@ -37,6 +40,17 @@ class RiskManager:
         self._server_holdings = float(my_pos.get("holdings", 0.0))
         self._server_avg_cost = float(my_pos.get("avg_cost", 0.0))
         self._server_unreal_pnl = float(my_pos.get("unrealized_pnl", 0.0))
+
+        # Check PnL floor
+        if self.equity < PNL_FLOOR and not self._pnl_floor_hit:
+            self._pnl_floor_hit = True
+            print(
+                f"[AlphaBot] ⚠ PNL FLOOR HIT — equity ${self.equity:.2f} "
+                f"< floor ${PNL_FLOOR:.2f}. Halting all new trades."
+            )
+
+    def is_pnl_floor_hit(self) -> bool:
+        return self._pnl_floor_hit
 
     def tick(self):
         if self.cooldown > 0:
@@ -49,6 +63,8 @@ class RiskManager:
             return 0.0
         if daily_halted:
             return 0.0
+        if self._pnl_floor_hit:
+            return 0.0
 
         risk_amount = self.equity * ALPHA_RISK_PCT
         stop_distance = entry_price * ALPHA_STOP_PCT
@@ -56,7 +72,10 @@ class RiskManager:
             return 0.0
 
         base_size = risk_amount / stop_distance
-        max_affordable = (self.equity * 0.20) / entry_price
+
+        # Hard cap: 20% of portfolio value per trade
+        max_position_value = self.equity * ALPHA_MAX_POSITION_PCT
+        max_affordable = max_position_value / entry_price
         base_size = min(base_size, max_affordable)
 
         final_size = base_size * confidence
