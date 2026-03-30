@@ -19,19 +19,20 @@ PNL_FLOOR = float(os.getenv("PNL_FLOOR", "80000.0"))
 ALPHA_RISK_PCT = float(os.getenv("ALPHA_RISK_PCT", "0.015"))
 ALPHA_STOP_PCT = float(os.getenv("ALPHA_STOP_PCT", "0.012"))
 ALPHA_TP_PCT = float(os.getenv("ALPHA_TP_PCT", "0.020"))
-ALPHA_SCORE_THRESHOLD = float(os.getenv("ALPHA_SCORE_THRESHOLD", "0.40"))
 ALPHA_DAILY_DRAWDOWN = float(os.getenv("ALPHA_DAILY_DRAWDOWN", "0.05"))
 ALPHA_COOLDOWN_TICKS = int(os.getenv("ALPHA_COOLDOWN_TICKS", "15"))
 ALPHA_MIN_TICKS = int(os.getenv("ALPHA_MIN_TICKS", "100"))
 ALPHA_PRICE_WINDOW = int(os.getenv("ALPHA_PRICE_WINDOW", "200"))
 ALPHA_MAX_POSITION_PCT = float(os.getenv("ALPHA_MAX_POSITION_PCT", "0.20"))
 
-# Alpha bot indicator periods
-EMA_SHORT = 12
-EMA_LONG = 26
-RSI_PERIOD = 50
-MACD_SIGNAL = 9
-BB_PERIOD = 20
+# Adaptive Alpha Bot — regime detection & signal parameters
+ALPHA_HURST_WINDOW = int(os.getenv("ALPHA_HURST_WINDOW", "100"))
+ALPHA_HURST_TRENDING = float(os.getenv("ALPHA_HURST_TRENDING", "0.6"))
+ALPHA_HURST_MR = float(os.getenv("ALPHA_HURST_MR", "0.4"))
+ALPHA_ATR_PERIOD = int(os.getenv("ALPHA_ATR_PERIOD", "14"))
+ALPHA_ATR_RISK_MULT = float(os.getenv("ALPHA_ATR_RISK_MULT", "10.0"))
+ALPHA_MOMENTUM_THRESH = float(os.getenv("ALPHA_MOMENTUM_THRESH", "0.5"))
+ALPHA_ZSCORE_THRESH = float(os.getenv("ALPHA_ZSCORE_THRESH", "1.5"))
 
 # Market maker parameters
 MM_BASE_SPREAD_PCT = float(os.getenv("MM_BASE_SPREAD_PCT", "0.0018"))

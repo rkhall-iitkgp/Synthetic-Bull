@@ -9,7 +9,7 @@
 
 ---
 
-## 0. Context & Constraints
+## 0. Context & Constraint
 
 ### What already exists (do not touch)
 
