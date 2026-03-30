@@ -26,5 +26,7 @@ Thumbs.db
 backend/deps/
 
 INTEGRATION.md
-BOTS_README.md
-BOTS_UPDATES.md
+README.md
+bots/FRONTEND_BOTS_API_README.md
+bots/BOTS_UPDATES.md
+bots/BOTS_README.md

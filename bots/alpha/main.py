@@ -9,21 +9,31 @@ Key profitability improvements:
   - PnL floor halt at $80k
   - 15-second post-trade cooldown
   - 20% hard position cap per trade
-  - RSI-50 + price-deviation indicator for stable signals
+  - Regime-adaptive strategy with Hurst + OBI + ATR sizing
   - Cancel-all on reconnect
 """
 
 import asyncio
+import threading
+import time
 
 from alpha.drawdown_guard import DrawdownGuard
-from alpha.indicators import IndicatorEngine
+from alpha.indicators import compute_hurst
 from alpha.kpi_tracker import KPITracker
 from alpha.risk_manager import RiskManager
-from alpha.signal_scorer import SignalScorer
+from alpha.signal_scorer import RegimeSignalProcessor
 from alpha.status_server import run as run_status_server
 from alpha.status_server import update_status
 from alpha.tick_buffer import TickBuffer
-from shared.config import ALPHA_SYMBOL, ALPHA_TP_PCT, ALPHA_STOP_PCT, STARTING_EQUITY
+from shared.config import (
+    ALPHA_HURST_MR,
+    ALPHA_HURST_TRENDING,
+    ALPHA_HURST_WINDOW,
+    ALPHA_STOP_PCT,
+    ALPHA_SYMBOL,
+    ALPHA_TP_PCT,
+    STARTING_EQUITY,
+)
 from shared.exchange_client import ExchangeClient
 
 
@@ -35,13 +45,16 @@ class AlphaBot:
             on_reconnect=self._on_reconnect,
         )
         self.buffer = TickBuffer()
-        self.indicators = IndicatorEngine()
-        self.scorer = SignalScorer()
+        self.scorer = RegimeSignalProcessor()
         self.risk = RiskManager(symbol=ALPHA_SYMBOL)
         self.drawdown = DrawdownGuard(STARTING_EQUITY)
         self.kpi = KPITracker()
         self.pending_tp_order_id: int | None = None
         self.latest_mid: float = 0.0
+        self.latest_bids: list = []
+        self.latest_asks: list = []
+        self._regime: str = "random"
+        self._regime_lock = threading.Lock()
 
         self._initial_replay_done = True
         self._waiting_for_entry_ack = False
@@ -54,14 +67,41 @@ class AlphaBot:
         self._initial_sync_done: bool = False
 
     async def run(self):
+        hurst_thread = threading.Thread(
+            target=self._hurst_worker,
+            daemon=True,
+            name="hurst-worker",
+        )
+        hurst_thread.start()
+
         await asyncio.gather(
             self.client.run(),
             run_status_server(),
         )
 
+    def _hurst_worker(self):
+        while True:
+            time.sleep(2.0)
+            prices = self.buffer.get()
+            if len(prices) < ALPHA_HURST_WINDOW:
+                continue
+
+            hurst = compute_hurst(prices[-ALPHA_HURST_WINDOW:])
+            if hurst > ALPHA_HURST_TRENDING:
+                new_regime = "trending"
+            elif hurst < ALPHA_HURST_MR:
+                new_regime = "mean_reverting"
+            else:
+                new_regime = "random"
+
+            with self._regime_lock:
+                if self._regime != new_regime:
+                    print(f"[AlphaBot] Regime: {self._regime} -> {new_regime} (H={hurst:.3f})")
+                self._regime = new_regime
+
     async def _on_reconnect(self):
         """Cancel all known orders on reconnect."""
-        print("[AlphaBot] Reconnect detected — cancelling TP order if any")
+        print("[AlphaBot] Reconnect detected - cancelling TP order if any")
         if self.pending_tp_order_id is not None:
             await self.client.cancel(self.symbol, self.pending_tp_order_id)
             self.pending_tp_order_id = None
@@ -100,7 +140,9 @@ class AlphaBot:
             await self._on_candle(msg)
 
         elif t == "orderbook":
-            self.latest_mid = msg.get("mid", self.latest_mid)
+            self.latest_mid = float(msg.get("mid", self.latest_mid))
+            self.latest_bids = msg.get("bids", [])
+            self.latest_asks = msg.get("asks", [])
             await self._check_stop_loss()
             self._update_status()
 
@@ -133,6 +175,10 @@ class AlphaBot:
         self.kpi = KPITracker()
         self.pending_tp_order_id = None
         self.latest_mid = 0.0
+        self.latest_bids = []
+        self.latest_asks = []
+        with self._regime_lock:
+            self._regime = "random"
         self._initial_replay_done = True
         self._waiting_for_entry_ack = False
         self._waiting_for_tp_ack = False
@@ -162,7 +208,7 @@ class AlphaBot:
 
         if not self._warmup_logged:
             self._warmup_logged = True
-            print(f"[AlphaBot] Warmup complete — {self.buffer.size()} candles buffered, signals active")
+            print(f"[AlphaBot] Warmup complete - {self.buffer.size()} candles buffered, signals active")
 
         total_val = self.risk.get_equity()
         circuit_fired = self.drawdown.tick(total_val)
@@ -209,7 +255,7 @@ class AlphaBot:
         else:
             await self.client.place_market(self.symbol, "buy", position.quantity)
 
-        pnl = self.risk.close_position(self.latest_mid, "STOP_LOSS")
+        self.risk.close_position(self.latest_mid, "STOP_LOSS")
         self.kpi.record_trade(
             position.entry_price,
             self.latest_mid,
@@ -223,9 +269,12 @@ class AlphaBot:
         if not self.buffer.is_ready():
             return
 
-        votes = self.indicators.compute(self.buffer.get())
-        signal = self.scorer.score(votes)
-        if not self.risk.should_reverse_exit(signal["decision"], signal["score"]):
+        prices = self.buffer.get()
+        with self._regime_lock:
+            regime = self._regime
+
+        signal = self.scorer.process(regime, prices, self.latest_bids, self.latest_asks)
+        if not self.risk.should_reverse_exit(signal["decision"], signal["signal"]):
             return
 
         position = self.risk.get_position()
@@ -239,7 +288,7 @@ class AlphaBot:
         else:
             await self.client.place_market(self.symbol, "buy", position.quantity)
 
-        pnl = self.risk.close_position(price, "SIGNAL_REVERSAL")
+        self.risk.close_position(price, "SIGNAL_REVERSAL")
         self.kpi.record_trade(
             position.entry_price,
             price,
@@ -250,26 +299,34 @@ class AlphaBot:
         )
 
     async def _check_entry(self, price: float):
-        votes = self.indicators.compute(self.buffer.get())
-        signal = self.scorer.score(votes)
+        prices = self.buffer.get()
+        with self._regime_lock:
+            regime = self._regime
+
+        signal = self.scorer.process(regime, prices, self.latest_bids, self.latest_asks)
 
         # Debug logging every 10 candles
         if self._candle_count % 10 == 0:
             print(
-                f"[AlphaBot] {self.symbol} score={signal['score']:.3f} "
-                f"decision={signal['decision']} confidence={signal['confidence']:.2f} "
-                f"votes={{ema:{votes['ema']:.2f} rsi:{votes['rsi']:.2f} "
-                f"macd:{votes['macd']:.2f} bb:{votes['bollinger']:.2f} "
-                f"pdev:{votes['price_deviation']:.2f}}} "
+                f"[AlphaBot] {self.symbol} regime={regime} signal={signal['signal']:.3f} "
+                f"decision={signal['decision']} obi={signal['obi_raw']:.3f} "
                 f"cooldown={self.risk.cooldown} mid={price:.2f}"
             )
 
         if signal["decision"] == "BUY":
-            qty = self.risk.calculate_size(price, signal["confidence"], self.drawdown.is_halted())
+            qty = self.risk.calculate_size(
+                price,
+                signal["signal"],
+                self.drawdown.is_halted(),
+                prices,
+            )
             if qty <= 0:
                 return
 
-            print(f"[AlphaBot] ▲ LONG entry signal | score={signal['score']:.3f} qty={qty:.4f} @ ~{price:.2f}")
+            print(
+                f"[AlphaBot] LONG entry | regime={regime} "
+                f"signal={signal['signal']:.3f} qty={qty:.4f} @ ~{price:.2f}"
+            )
             await self.client.place_market(self.symbol, "buy", qty)
             self._waiting_for_entry_ack = True
             self._pending_entry_qty = qty
@@ -277,11 +334,19 @@ class AlphaBot:
             self._pending_entry_side = "long"
 
         elif signal["decision"] == "SELL":
-            qty = self.risk.calculate_size(price, signal["confidence"], self.drawdown.is_halted())
+            qty = self.risk.calculate_size(
+                price,
+                signal["signal"],
+                self.drawdown.is_halted(),
+                prices,
+            )
             if qty <= 0:
                 return
 
-            print(f"[AlphaBot] ▼ SHORT entry signal | score={signal['score']:.3f} qty={qty:.4f} @ ~{price:.2f}")
+            print(
+                f"[AlphaBot] SHORT entry | regime={regime} "
+                f"signal={signal['signal']:.3f} qty={qty:.4f} @ ~{price:.2f}"
+            )
             await self.client.place_market(self.symbol, "sell", qty)
             self._waiting_for_entry_ack = True
             self._pending_entry_qty = qty
@@ -389,6 +454,8 @@ class AlphaBot:
             pos = position.side.upper()
         status = self.kpi.get_status(self.risk.get_equity(), pos)
         status["halted"] = self.risk.is_pnl_floor_hit() or self.drawdown.is_halted()
+        with self._regime_lock:
+            status["regime"] = self._regime
         update_status(status)
 
 

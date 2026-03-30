@@ -1,40 +1,41 @@
-from shared.config import ALPHA_SCORE_THRESHOLD
-
-# Updated weights: 5 indicators with price_deviation replacing some RSI weight
-WEIGHTS = {
-    "ema": 0.25,
-    "rsi": 0.15,
-    "macd": 0.25,
-    "bollinger": 0.15,
-    "price_deviation": 0.20,
-}
+from alpha.indicators import momentum_signal, order_book_imbalance, zscore_signal
+from shared.config import ALPHA_MOMENTUM_THRESH, ALPHA_ZSCORE_THRESH
 
 
-class SignalScorer:
-    def score(self, votes: dict) -> dict:
-        score = 0.0
-        for key, weight in WEIGHTS.items():
-            score += float(votes.get(key, 0.0)) * weight
+class RegimeSignalProcessor:
+    """Select strategy by regime, then apply OBI confirmation gate."""
 
-        if score > ALPHA_SCORE_THRESHOLD:
-            decision = "BUY"
-        elif score < -ALPHA_SCORE_THRESHOLD:
-            decision = "SELL"
-        else:
-            decision = "HOLD"
+    def process(self, regime: str, prices: list[float], bids: list, asks: list) -> dict:
+        if regime == "random":
+            return {"signal": 0.0, "decision": "HOLD", "obi_raw": 0.0, "regime": regime}
 
-        confidence = 0.0
-        if decision != "HOLD":
-            total_indicators = len(WEIGHTS)
-            if decision == "BUY":
-                agree = sum(1 for k in WEIGHTS if float(votes.get(k, 0.0)) > 0)
+        if regime == "trending":
+            raw = momentum_signal(prices)
+            if raw > ALPHA_MOMENTUM_THRESH:
+                candidate = "BUY"
+            elif raw < -ALPHA_MOMENTUM_THRESH:
+                candidate = "SELL"
             else:
-                agree = sum(1 for k in WEIGHTS if float(votes.get(k, 0.0)) < 0)
-            confidence = min(max(agree / total_indicators, 0.0), 1.0)
+                return {"signal": float(raw), "decision": "HOLD", "obi_raw": 0.0, "regime": regime}
+        elif regime == "mean_reverting":
+            z_val = zscore_signal(prices)
+            raw = -z_val
+            if z_val > ALPHA_ZSCORE_THRESH:
+                candidate = "SELL"
+            elif z_val < -ALPHA_ZSCORE_THRESH:
+                candidate = "BUY"
+            else:
+                return {"signal": float(raw), "decision": "HOLD", "obi_raw": 0.0, "regime": regime}
+        else:
+            return {"signal": 0.0, "decision": "HOLD", "obi_raw": 0.0, "regime": "random"}
+
+        obi = order_book_imbalance(bids, asks)
+        if (candidate == "BUY" and obi <= 0) or (candidate == "SELL" and obi >= 0):
+            return {"signal": float(raw), "decision": "HOLD", "obi_raw": float(obi), "regime": regime}
 
         return {
-            "score": float(score),
-            "decision": decision,
-            "confidence": float(confidence),
-            "votes": votes,
+            "signal": float(raw),
+            "decision": candidate,
+            "obi_raw": float(obi),
+            "regime": regime,
         }

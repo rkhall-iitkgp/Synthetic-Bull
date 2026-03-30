@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 
+from alpha.indicators import compute_atr
 from shared.config import (
+    ALPHA_ATR_PERIOD,
+    ALPHA_ATR_RISK_MULT,
     ALPHA_COOLDOWN_TICKS,
     ALPHA_MAX_POSITION_PCT,
     ALPHA_RISK_PCT,
@@ -56,7 +59,13 @@ class RiskManager:
         if self.cooldown > 0:
             self.cooldown -= 1
 
-    def calculate_size(self, entry_price: float, confidence: float, daily_halted: bool) -> float:
+    def calculate_size(
+        self,
+        entry_price: float,
+        signal_strength: float,
+        daily_halted: bool,
+        prices: list[float],
+    ) -> float:
         if self.position is not None:
             return 0.0
         if self.cooldown > 0:
@@ -66,19 +75,18 @@ class RiskManager:
         if self._pnl_floor_hit:
             return 0.0
 
-        risk_amount = self.equity * ALPHA_RISK_PCT
-        stop_distance = entry_price * ALPHA_STOP_PCT
-        if stop_distance <= 0:
+        atr = compute_atr(prices, ALPHA_ATR_PERIOD)
+        if atr <= 0:
             return 0.0
 
-        base_size = risk_amount / stop_distance
+        risk_amount = self.equity * ALPHA_RISK_PCT
+        base_size = risk_amount / (atr * ALPHA_ATR_RISK_MULT)
+        scaled_size = base_size * min(abs(float(signal_strength)), 1.0)
 
         # Hard cap: 20% of portfolio value per trade
         max_position_value = self.equity * ALPHA_MAX_POSITION_PCT
         max_affordable = max_position_value / entry_price
-        base_size = min(base_size, max_affordable)
-
-        final_size = base_size * confidence
+        final_size = min(scaled_size, max_affordable)
 
         if final_size < 0.001:
             return 0.0
