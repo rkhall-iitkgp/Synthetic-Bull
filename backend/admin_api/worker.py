@@ -34,49 +34,66 @@ async def logger_worker():
                 print(f"[Worker] Auth response: {auth_resp}")
 
                 db = SessionLocal()
-                
+
                 # Batch processing
                 batch = []
+                seen_trades = set()
                 last_commit = datetime.now()
 
                 while True:
-                    msg = await websocket.recv()
-                    data = json.loads(msg)
+                    try:
+                        msg = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                        data = json.loads(msg)
 
-                    if data.get("type") == "trade":
-                        await broadcast_to_clients(data)
+                        if data.get("type") == "trade":
+                            trade_id = f"{data['symbol']}_{data['id']}"
+                            if trade_id in seen_trades:
+                                continue
+                            seen_trades.add(trade_id)
+                            
+                            # Prevent memory leak over days
+                            if len(seen_trades) > 5000:
+                                seen_trades.clear()
 
-                        trade = models.Trade(
-                            id=str(data["id"]),
-                            bot_id=data["buyer"],  # We record buyer and seller?
-                            # The spec says trade needs bot_id, but a trade has a buyer and a seller.
-                            # We can insert two records or adjust Schema. Let's insert two for PnL tracking, or just update the portfolio.
-                            symbol=data["symbol"],
-                            side="buy", # this is relative to 'buyer'       
-                            price=data["price"],
-                            qty=data["qty"],
-                            timestamp=datetime.fromtimestamp(data["ts"] / 1000000.0, tz=timezone.utc)
-                        )
-                        trade2 = models.Trade(
-                            id=str(data["id"]) + "_sell",
-                            bot_id=data["seller"],
-                            symbol=data["symbol"],
-                            side="sell",
-                            price=data["price"],
-                            qty=data["qty"],
-                            timestamp=datetime.fromtimestamp(data["ts"] / 1000000.0, tz=timezone.utc)
-                        )
+                            await broadcast_to_clients(data)
 
-                        # Only add trades for real bots, ignore "sim_bot"   
-                        if data["buyer"] != "sim_bot":
-                            batch.append(trade)
-                        if data["seller"] != "sim_bot":
-                            batch.append(trade2)
+                            trade = models.Trade(
+                                id=trade_id + "_buy",
+                                bot_id=data["buyer"],  # We record buyer and seller?
+                                # The spec says trade needs bot_id, but a trade has a buyer and a seller.
+                                # We can insert two records or adjust Schema. Let's insert two for PnL tracking, or just update the portfolio.
+                                symbol=data["symbol"],
+                                side="buy", # this is relative to 'buyer'       
+                                price=data["price"],
+                                qty=data["qty"],
+                                timestamp=datetime.fromtimestamp(data["ts"] / 1000000.0, tz=timezone.utc)
+                            )
+                            trade2 = models.Trade(
+                                id=trade_id + "_sell",
+                                bot_id=data["seller"],
+                                symbol=data["symbol"],
+                                side="sell",
+                                price=data["price"],
+                                qty=data["qty"],
+                                timestamp=datetime.fromtimestamp(data["ts"] / 1000000.0, tz=timezone.utc)
+                            )
+
+                            # Only add trades for real bots, ignore "sim_bot"   
+                            if data["buyer"] != "sim_bot":
+                                batch.append(trade)
+                            if data["seller"] != "sim_bot":
+                                batch.append(trade2)
+
+                    except asyncio.TimeoutError:
+                        pass # Proceed to flush
 
                     # Simple batching every 10 items or 2 seconds
-                    if len(batch) >= 10 or (datetime.now() - last_commit).seconds >= 2:
+                    if len(batch) >= 10 or (batch and (datetime.now() - last_commit).seconds >= 2):
                         if batch:
                             try:
+                                print(f"[Worker] Committing batch of {len(batch)} trades...")
+                                for b in batch:
+                                    print(f"  - {b.id} | bot: {b.bot_id} | side: {b.side} | qty: {b.qty}")
                                 db.bulk_save_objects(batch)
                                 db.commit()
                             except Exception as e:
