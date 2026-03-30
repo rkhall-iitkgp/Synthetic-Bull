@@ -78,10 +78,27 @@ def get_bot_portfolio(bot_id: str, db: Session = Depends(get_db)):
     if not bot:
         raise HTTPException(status_code=404, detail="Bot not found")
         
-    portfolio = db.query(models.Portfolio).filter(models.Portfolio.bot_id == bot_id).first()
-    positions = db.query(models.Position).filter(models.Position.bot_id == bot_id).all()
+    # Compute portfolio dynamically from trades
+    trades = db.query(models.Trade).filter(models.Trade.bot_id == bot_id).all()
     
+    cash_balance = 100000.0  # Initial fake provision
+    positions = {}
+    
+    for t in trades:
+        value = t.price * t.qty
+        if t.side == "buy" or t.side == "BUY":
+            cash_balance -= value
+            positions[t.symbol] = positions.get(t.symbol, 0) + t.qty
+        else:
+            cash_balance += value
+            positions[t.symbol] = positions.get(t.symbol, 0) - t.qty
+
+    position_list = []
+    for sym, qty in positions.items():
+        if round(qty, 6) != 0:
+            position_list.append({"symbol": sym, "qty": qty, "avg_entry_price": 0.0})
+
     return {
-        "cash_balance": portfolio.cash_balance if portfolio else 0.0,
-        "positions": [schemas.PositionResponse.model_validate(p) for p in positions]
+        "cash_balance": round(cash_balance, 2),       
+        "positions": position_list
     }
