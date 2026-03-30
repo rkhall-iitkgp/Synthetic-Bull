@@ -2,6 +2,7 @@ import os
 
 # Exchange connection
 EXCHANGE_WS_URL = os.getenv("EXCHANGE_WS_URL", "ws://127.0.0.1:9001")
+BOT_API_KEY = os.getenv("BOT_API_KEY", "")
 # Docker: set EXCHANGE_WS_URL=ws://engine:9001
 
 # Bot HTTP status servers

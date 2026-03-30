@@ -33,12 +33,14 @@ target_link_libraries(SyntheticBull PRIVATE
 find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(SQLite3 REQUIRED)
 
 target_link_libraries(SyntheticBull PRIVATE
     Threads::Threads
     ZLIB::ZLIB
     OpenSSL::SSL
     OpenSSL::Crypto
+    SQLite::SQLite3
 )
 
 # ── Compiler flags ──
