@@ -11,6 +11,9 @@ from database import SessionLocal
 MASTER_API_KEY = "sk_admin_12345"
 WS_URL = os.getenv("ENGINE_WS_URL", "ws://localhost:9001")
 
+# Shared queue for deposit requests from the API endpoint
+deposit_queue = asyncio.Queue()
+
 async def broadcast_to_clients(data):
     from main import active_connections
     for conn in active_connections:
@@ -86,6 +89,21 @@ async def logger_worker():
 
                     except asyncio.TimeoutError:
                         pass # Proceed to flush
+
+                    # Forward any pending deposit requests to the C++ engine
+                    while not deposit_queue.empty():
+                        try:
+                            dep = deposit_queue.get_nowait()
+                            await websocket.send(json.dumps({
+                                "type": "deposit",
+                                "bot_id": dep["bot_id"],
+                                "amount": dep["amount"]
+                            }))
+                            print(f"[Worker] Forwarded deposit: {dep['amount']} to bot {dep['bot_id']}")
+                        except asyncio.QueueEmpty:
+                            break
+                        except Exception as e:
+                            print(f"[Worker] Failed to forward deposit: {e}")
 
                     # Simple batching every 10 items or 2 seconds
                     if len(batch) >= 10 or (batch and (datetime.now() - last_commit).seconds >= 2):

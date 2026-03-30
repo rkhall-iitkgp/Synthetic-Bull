@@ -26,6 +26,7 @@ class Portfolio(Base):
     id = Column(String, primary_key=True, index=True, default=generate_uuid)
     bot_id = Column(String, ForeignKey("bots.id"))
     cash_balance = Column(Float, default=100000.0)
+    initial_capital = Column(Float, default=100000.0)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
 
     bot = relationship("Bot", back_populates="portfolios")

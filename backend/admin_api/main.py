@@ -8,7 +8,7 @@ from typing import List
 
 import models, schemas
 from database import engine, get_db
-from worker import logger_worker
+from worker import logger_worker, deposit_queue
 
 # Create database tables
 models.Base.metadata.create_all(bind=engine)
@@ -80,10 +80,12 @@ def get_bot_portfolio(bot_id: str, db: Session = Depends(get_db)):
         
     # Compute portfolio dynamically from trades
     trades = db.query(models.Trade).filter(models.Trade.bot_id == bot_id).all()
-    
-    cash_balance = 100000.0  # Initial fake provision
+
+    portfolio_record = db.query(models.Portfolio).filter(models.Portfolio.bot_id == bot_id).first()
+    initial_capital = (portfolio_record.initial_capital if portfolio_record and portfolio_record.initial_capital else 100000.0)
+    cash_balance = initial_capital
     positions = {}
-    
+
     for t in trades:
         value = t.price * t.qty
         if t.side == "buy" or t.side == "BUY":
@@ -99,6 +101,44 @@ def get_bot_portfolio(bot_id: str, db: Session = Depends(get_db)):
             position_list.append({"symbol": sym, "qty": qty, "avg_entry_price": 0.0})
 
     return {
-        "cash_balance": round(cash_balance, 2),       
+        "cash_balance": round(cash_balance, 2),
+        "initial_capital": round(initial_capital, 2),
         "positions": position_list
     }
+
+@app.post("/api/bots/{bot_id}/deposit", response_model=schemas.DepositResponse)
+async def deposit_funds(bot_id: str, req: schemas.DepositRequest, db: Session = Depends(get_db)):
+    if req.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive")
+
+    bot = db.query(models.Bot).filter(models.Bot.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot not found")
+
+    portfolio = db.query(models.Portfolio).filter(models.Portfolio.bot_id == bot_id).first()
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+
+    # Update initial_capital (the base for dynamic cash computation)
+    portfolio.initial_capital = (portfolio.initial_capital or 100000.0) + req.amount
+    db.commit()
+    db.refresh(portfolio)
+
+    # Notify the C++ engine to update in-memory portfolio
+    await deposit_queue.put({"bot_id": bot_id, "amount": req.amount})
+
+    # Recompute current cash for response
+    trades = db.query(models.Trade).filter(models.Trade.bot_id == bot_id).all()
+    cash = portfolio.initial_capital
+    for t in trades:
+        value = t.price * t.qty
+        if t.side in ("buy", "BUY"):
+            cash -= value
+        else:
+            cash += value
+
+    return schemas.DepositResponse(
+        bot_id=bot_id,
+        amount=req.amount,
+        new_cash_balance=round(cash, 2)
+    )

@@ -41,3 +41,11 @@ class TradeResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class DepositRequest(BaseModel):
+    amount: float
+
+class DepositResponse(BaseModel):
+    bot_id: str
+    amount: float
+    new_cash_balance: float

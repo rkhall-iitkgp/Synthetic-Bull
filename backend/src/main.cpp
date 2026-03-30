@@ -785,6 +785,43 @@ int main() {
                     }
                 }
 
+                // Holdings check (for sell orders)
+                if (side == sb::Side::SELL) {
+                    double current_holdings = 0.0;
+                    {
+                        std::lock_guard<std::mutex> lock(g_portfolio_mutex);
+                        auto it = g_portfolios.find(uid);
+                        if (it != g_portfolios.end()) {
+                            auto pit = it->second.positions.find(symbol);
+                            if (pit != it->second.positions.end()) {
+                                current_holdings = pit->second.holdings;
+                            }
+                        }
+                    }
+
+                    // Subtract qty already reserved by open sell orders for the same symbol
+                    double reserved_qty = 0.0;
+                    {
+                        std::lock_guard<std::mutex> lock(g_open_orders_mutex);
+                        auto oit = g_open_orders.find(uid);
+                        if (oit != g_open_orders.end()) {
+                            for (const auto& oo : oit->second) {
+                                if (oo.symbol == symbol && oo.side == "sell") {
+                                    reserved_qty += oo.remaining_qty;
+                                }
+                            }
+                        }
+                    }
+
+                    double available = current_holdings - reserved_qty;
+                    if (available < orig_qty - 1e-12) {
+                        ws->send(json({{"type", "error"},
+                                       {"message", "Insufficient holdings"}}).dump(),
+                                 uWS::OpCode::TEXT);
+                        return;
+                    }
+                }
+
                 sb::Order order;
                 order.user_id  = uid;
                 order.symbol   = symbol;
@@ -868,6 +905,32 @@ int main() {
 
                 // Send updated open orders
                 ws->send(openOrdersToJson(uid).dump(), uWS::OpCode::TEXT);
+                return;
+            }
+
+            // ── deposit ── (admin only: add funds to a bot's portfolio)
+            if (msg_type == "deposit") {
+                std::string bot_id = req.value("bot_id", "");
+                double amount = req.value("amount", 0.0);
+
+                if (bot_id.empty() || amount <= 0.0) {
+                    ws->send(json({{"type", "error"},
+                                   {"message", "Invalid deposit parameters"}}).dump(),
+                             uWS::OpCode::TEXT);
+                    return;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(g_portfolio_mutex);
+                    g_portfolios[bot_id].cash += amount;
+                }
+
+                ws->send(json({{"type", "deposit_ack"},
+                               {"bot_id", bot_id},
+                               {"amount", amount}}).dump(),
+                         uWS::OpCode::TEXT);
+
+                std::cout << "[+] Deposit " << amount << " to bot " << bot_id << "\n";
                 return;
             }
 
