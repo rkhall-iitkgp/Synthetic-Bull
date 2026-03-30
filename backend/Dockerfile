@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y \
     cmake \
     libssl-dev \
     zlib1g-dev \
+    libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /deps
@@ -56,6 +57,7 @@ FROM ubuntu:22.04 AS runtime
 RUN apt-get update && apt-get install -y \
     libssl3 \
     zlib1g \
+    libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

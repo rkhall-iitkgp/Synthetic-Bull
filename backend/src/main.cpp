@@ -7,6 +7,7 @@
 
 #include <App.h>                 // uWebSockets
 #include <nlohmann/json.hpp>
+#include <sqlite3.h>
 
 #include <iostream>
 #include <string>
@@ -46,6 +47,8 @@ struct TokenBucket {
 
 struct PerSocketData {
     std::string user_id;
+    bool is_authenticated = false;
+    bool is_admin = false;
     TokenBucket rate_limiter;
 };
 
@@ -123,6 +126,11 @@ static std::vector<sb::SymbolConfig> getDefaultSymbols() {
 
 static sb::Exchange g_exchange;
 
+// Auth tables
+static std::unordered_map<std::string, std::string> g_valid_keys; // api_key -> bot_id
+static std::mutex g_auth_mutex;
+static std::string g_master_admin_key = "sk_admin_12345"; // For the data logger / firehose
+
 // Portfolio per user_id (cash is shared, positions are per-symbol)
 static std::unordered_map<std::string, sb::Portfolio> g_portfolios;
 static std::mutex g_portfolio_mutex;
@@ -153,6 +161,39 @@ static uWS::Loop* g_loop = nullptr;
 
 // Global app pointer for deferred publishes
 static uWS::App* g_app = nullptr;
+
+static void loadAuthKeysFromDB() {
+    sqlite3* db;
+    const char* db_dir = std::getenv("DB_DIR");
+    std::string db_path = db_dir ? std::string(db_dir) + "/admin.db" : "./admin.db";
+    
+    if (sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+        return; 
+    }
+    
+    const char* sql = "SELECT api_key, id FROM bots WHERE status = 'active'";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        std::unordered_map<std::string, std::string> new_keys;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::string api_key = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            std::string bot_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            new_keys[api_key] = bot_id;
+        }
+        sqlite3_finalize(stmt);
+        
+        std::lock_guard<std::mutex> lock(g_auth_mutex);
+        g_valid_keys = std::move(new_keys);
+    }
+    sqlite3_close(db);
+}
+
+static void authPollingThread() {
+    while (true) {
+        loadAuthKeysFromDB();
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+}
 
 // ─── Portfolio helpers ───────────────────────────────────────────────────────
 
@@ -452,6 +493,7 @@ static void broadcasterThread() {
             }
             for (auto& tm : trade_msgs) {
                 g_app->publish("market", tm, uWS::OpCode::TEXT);
+                g_app->publish("admin_firehose", tm, uWS::OpCode::TEXT);
             }
         });
     }
@@ -539,60 +581,22 @@ int main() {
         .maxBackpressure = 4 * 1024 * 1024,  // increased for multi-symbol
 
         // ── on open ──
-        .open = [&symbol_configs](auto* ws) {
-            std::string uid = "user_" + std::to_string(++g_user_counter);
+        .open = [](auto* ws) {
             auto* data = ws->getUserData();
-            data->user_id = uid;
-
-            // Subscribe to market topic
+            // Default to sim_bot, frontend works seamlessly. Real bots will authenticate and override this.
+            data->user_id = "sim_bot";
+            data->is_authenticated = true;
+            data->is_admin = false;
+            
+            // Auto-subscribe the default sim_bot to the market stream
             ws->subscribe("market");
 
-            // Create portfolio
             {
                 std::lock_guard<std::mutex> lock(g_portfolio_mutex);
-                g_portfolios[uid] = sb::Portfolio{};
-            }
-
-            // 1. Welcome message with all symbols
-            json symbols_json = json::array();
-            for (auto& cfg : symbol_configs) {
-                auto* state = g_exchange.get(cfg.symbol);
-                double price = state ? state->simulator->currentPrice() : cfg.initial_price;
-                symbols_json.push_back({
-                    {"symbol", cfg.symbol},
-                    {"price",  std::round(price * 100.0) / 100.0}
-                });
-            }
-
-            json welcome = {
-                {"type", "welcome"},
-                {"user_id", uid},
-                {"symbols", symbols_json}
-            };
-            ws->send(welcome.dump(), uWS::OpCode::TEXT);
-
-            // 2. Per-symbol: current order book snapshot + historical candles
-            g_exchange.forEachSymbol([&](const std::string& sym, sb::SymbolState& state) {
-                // Order book snapshot
-                auto snap = state.engine->getSnapshot(20);
-                ws->send(obSnapshotToJson(sym, snap).dump(), uWS::OpCode::TEXT);
-
-                // Replay historical candles
-                auto candles = state.candles->getHistory(200);
-                for (auto& c : candles) {
-                    ws->send(candleToJson(sym, c).dump(), uWS::OpCode::TEXT);
+                if (g_portfolios.find("sim_bot") == g_portfolios.end()) {
+                    g_portfolios["sim_bot"] = sb::Portfolio{};
                 }
-            });
-
-            // 3. Portfolio + open orders
-            {
-                std::lock_guard<std::mutex> lock(g_portfolio_mutex);
-                auto& pf = g_portfolios[uid];
-                ws->send(portfolioToJson(pf).dump(), uWS::OpCode::TEXT);
             }
-            ws->send(openOrdersToJson(uid).dump(), uWS::OpCode::TEXT);
-
-            std::cout << "[+] " << uid << " connected\n";
         },
 
         // ── on message ──
@@ -625,6 +629,93 @@ int main() {
             if (msg_type == "ping") {
                 ws->send(json({{"type", "pong"}, {"ts", sb::now_ms()}}).dump(),
                          uWS::OpCode::TEXT);
+                return;
+            }
+
+            if (msg_type == "auth") {
+                std::string api_key = req.value("api_key", "");
+                std::string bot_id = "";
+                bool admin = false;
+                
+                if (api_key == g_master_admin_key) {
+                    bot_id = "ADMIN";
+                    admin = true;
+                } else {
+                    std::lock_guard<std::mutex> lock(g_auth_mutex);
+                    auto it = g_valid_keys.find(api_key);
+                    if (it != g_valid_keys.end()) {
+                        bot_id = it->second;
+                    }
+                }
+
+                if (bot_id.empty()) {
+                    ws->send(json({{"type", "error"}, {"message", "Invalid API key"}}).dump(), uWS::OpCode::TEXT);
+                    return;
+                }
+
+                data->user_id = bot_id;
+                data->is_authenticated = true;
+                data->is_admin = admin;
+
+                if (admin) {
+                    ws->subscribe("admin_firehose");
+                    ws->send(json({{"type", "auth_success"}, {"role", "admin"}}).dump(), uWS::OpCode::TEXT);
+                    std::cout << "[+] Admin connected\n";
+                    return;
+                }
+
+                // Regular bot
+                ws->subscribe("market");
+                
+                {
+                    std::lock_guard<std::mutex> lock(g_portfolio_mutex);
+                    if (g_portfolios.find(bot_id) == g_portfolios.end()) {
+                        // Initialize local cache of portfolio if missing
+                        // Optionally we could load starting balance from DB here.
+                        // For now we'll lazily start with 100000 or the existing state
+                        g_portfolios[bot_id] = sb::Portfolio{};
+                    }
+                }
+
+                json symbols_json = json::array();
+                // Send welcome message and state here. We'll reconstruct symbol_configs logic.
+                g_exchange.forEachSymbol([&](const std::string& sym, sb::SymbolState& state) {
+                    symbols_json.push_back({
+                        {"symbol", sym},
+                        {"price",  std::round(state.simulator->currentPrice() * 100.0) / 100.0}
+                    });
+                });
+
+                json welcome = {
+                    {"type", "welcome"},
+                    {"user_id", bot_id},
+                    {"symbols", symbols_json}
+                };
+                ws->send(welcome.dump(), uWS::OpCode::TEXT);
+
+                g_exchange.forEachSymbol([&](const std::string& sym, sb::SymbolState& state) {
+                    auto snap = state.engine->getSnapshot(20);
+                    ws->send(obSnapshotToJson(sym, snap).dump(), uWS::OpCode::TEXT);
+                    auto candles = state.candles->getHistory(200);
+                    for (auto& c : candles) {
+                        ws->send(candleToJson(sym, c).dump(), uWS::OpCode::TEXT);
+                    }
+                });
+
+                {
+                    std::lock_guard<std::mutex> lock(g_portfolio_mutex);
+                    auto& pf = g_portfolios[bot_id];
+                    ws->send(portfolioToJson(pf).dump(), uWS::OpCode::TEXT);
+                }
+                ws->send(openOrdersToJson(bot_id).dump(), uWS::OpCode::TEXT);
+
+                std::cout << "[+] Bot " << bot_id << " authenticated\n";
+                return;
+            }
+
+            // Require auth for the remaining
+            if (!data->is_authenticated) {
+                ws->send(json({{"type", "error"}, {"message", "Not authenticated"}}).dump(), uWS::OpCode::TEXT);
                 return;
             }
 
@@ -689,6 +780,43 @@ int main() {
                     if (it != g_portfolios.end() && it->second.cash < order_cost) {
                         ws->send(json({{"type", "error"},
                                        {"message", "Insufficient cash"}}).dump(),
+                                 uWS::OpCode::TEXT);
+                        return;
+                    }
+                }
+
+                // Holdings check (for sell orders)
+                if (side == sb::Side::SELL) {
+                    double current_holdings = 0.0;
+                    {
+                        std::lock_guard<std::mutex> lock(g_portfolio_mutex);
+                        auto it = g_portfolios.find(uid);
+                        if (it != g_portfolios.end()) {
+                            auto pit = it->second.positions.find(symbol);
+                            if (pit != it->second.positions.end()) {
+                                current_holdings = pit->second.holdings;
+                            }
+                        }
+                    }
+
+                    // Subtract qty already reserved by open sell orders for the same symbol
+                    double reserved_qty = 0.0;
+                    {
+                        std::lock_guard<std::mutex> lock(g_open_orders_mutex);
+                        auto oit = g_open_orders.find(uid);
+                        if (oit != g_open_orders.end()) {
+                            for (const auto& oo : oit->second) {
+                                if (oo.symbol == symbol && oo.side == "sell") {
+                                    reserved_qty += oo.remaining_qty;
+                                }
+                            }
+                        }
+                    }
+
+                    double available = current_holdings - reserved_qty;
+                    if (available < orig_qty - 1e-12) {
+                        ws->send(json({{"type", "error"},
+                                       {"message", "Insufficient holdings"}}).dump(),
                                  uWS::OpCode::TEXT);
                         return;
                     }
@@ -780,6 +908,32 @@ int main() {
                 return;
             }
 
+            // ── deposit ── (admin only: add funds to a bot's portfolio)
+            if (msg_type == "deposit") {
+                std::string bot_id = req.value("bot_id", "");
+                double amount = req.value("amount", 0.0);
+
+                if (bot_id.empty() || amount <= 0.0) {
+                    ws->send(json({{"type", "error"},
+                                   {"message", "Invalid deposit parameters"}}).dump(),
+                             uWS::OpCode::TEXT);
+                    return;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(g_portfolio_mutex);
+                    g_portfolios[bot_id].cash += amount;
+                }
+
+                ws->send(json({{"type", "deposit_ack"},
+                               {"bot_id", bot_id},
+                               {"amount", amount}}).dump(),
+                         uWS::OpCode::TEXT);
+
+                std::cout << "[+] Deposit " << amount << " to bot " << bot_id << "\n";
+                return;
+            }
+
             // ── get_symbols ── (request symbol list at any time)
             if (msg_type == "get_symbols") {
                 json symbols_json = json::array();
@@ -828,6 +982,10 @@ int main() {
     std::cout << "[~] Starting broadcaster (100ms interval + correlated noise)\n";
     std::thread broadcaster(broadcasterThread);
     broadcaster.detach();
+
+    // Start auth polling thread
+    std::thread auth_poller(authPollingThread);
+    auth_poller.detach();
 
     // Build symbol→sector mapping for correlation
     for (auto& cfg : symbol_configs) {

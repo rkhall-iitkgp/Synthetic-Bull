@@ -4,7 +4,7 @@ from typing import Awaitable, Callable
 
 import websockets
 
-from shared.config import EXCHANGE_WS_URL
+from shared.config import EXCHANGE_WS_URL, BOT_API_KEY
 
 
 class ExchangeClient:
@@ -34,13 +34,20 @@ class ExchangeClient:
             try:
                 async with websockets.connect(EXCHANGE_WS_URL) as ws:
                     self._ws = ws
+                    
+                    # Immediately send auth message
+                    await ws.send(json.dumps({
+                        "type": "auth",
+                        "api_key": BOT_API_KEY
+                    }))
+                    
                     self._connected.set()
                     backoff = 1
 
                     is_reconnect = not self._first_connect
                     self._first_connect = False
 
-                    print(f"[ExchangeClient] Connected to {EXCHANGE_WS_URL}")
+                    print(f"[ExchangeClient] Connected to {EXCHANGE_WS_URL} and authenticated")
 
                     if is_reconnect and self.on_reconnect:
                         try:

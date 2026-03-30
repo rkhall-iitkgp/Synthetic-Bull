@@ -9,6 +9,24 @@ services:
     ports:
       - "9001:9001"
     restart: unless-stopped
+    environment:
+      - DB_DIR=/data
+    volumes:
+      - ./data:/data
+    networks:
+      - bull-net
+
+  admin_api:
+    build: ./backend/admin_api
+    container_name: synthetic-bull-admin
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_DIR=/data
+      - ENGINE_WS_URL=ws://engine:9001
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
     networks:
       - bull-net
 
