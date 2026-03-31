@@ -31,12 +31,14 @@ class RiskManager:
         self.position: Position | None = None
         self.cooldown: int = 0
         self._server_holdings: float = 0.0
+        self._server_cash: float = STARTING_EQUITY
         self._server_avg_cost: float = 0.0
         self._server_unreal_pnl: float = 0.0
         self._pnl_floor_hit: bool = False
 
     def on_portfolio_update(self, msg: dict):
         self.equity = float(msg.get("total_value", self.equity))
+        self._server_cash = float(msg.get("cash", self._server_cash))
 
         positions = msg.get("positions", {})
         my_pos = positions.get(self.symbol, {})
@@ -86,7 +88,8 @@ class RiskManager:
         # Hard cap: 20% of portfolio value per trade
         max_position_value = self.equity * ALPHA_MAX_POSITION_PCT
         max_affordable = max_position_value / entry_price
-        final_size = min(scaled_size, max_affordable)
+        cash_affordable = self._server_cash / entry_price if entry_price > 0 else 0.0
+        final_size = min(scaled_size, max_affordable, cash_affordable)
 
         if final_size < 0.001:
             return 0.0
@@ -157,3 +160,9 @@ class RiskManager:
 
     def get_position(self) -> Position | None:
         return self.position
+
+    def get_server_holdings(self) -> float:
+        return max(0.0, self._server_holdings)
+
+    def get_server_cash(self) -> float:
+        return max(0.0, self._server_cash)

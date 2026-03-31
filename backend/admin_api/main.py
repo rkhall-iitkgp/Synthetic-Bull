@@ -1,9 +1,11 @@
 import uuid
 import secrets
 import asyncio
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import List
 
 import models, schemas
@@ -31,6 +33,106 @@ async def startup_event():
 
 def generate_api_key():
     return f"sk_live_{secrets.token_hex(16)}"
+
+
+def _normalize_bot_identifier(value: str) -> str:
+    return value.strip().lower().replace("_", " ").replace("-", " ")
+
+
+def _base_bot_identifier(value: str) -> str:
+    normalized = _normalize_bot_identifier(value)
+    if normalized.endswith(" bot"):
+        normalized = normalized[:-4]
+    if normalized.endswith("bot"):
+        normalized = normalized[:-3]
+    return " ".join(normalized.split()).strip()
+
+
+def resolve_bot(db: Session, bot_identifier: str) -> models.Bot | None:
+    # 1) Direct id match (UUID path)
+    bot = db.query(models.Bot).filter(models.Bot.id == bot_identifier).first()
+    if bot:
+        return bot
+
+    # 2) Exact name match (case-insensitive)
+    bot = db.query(models.Bot).filter(func.lower(models.Bot.name) == bot_identifier.strip().lower()).first()
+    if bot:
+        return bot
+
+    # 3) Slug-style match: alpha_bot / alpha-bot / Alpha Bot -> compare normalized forms
+    normalized = _normalize_bot_identifier(bot_identifier)
+    candidates = db.query(models.Bot).all()
+    for candidate in candidates:
+        if _normalize_bot_identifier(candidate.name) == normalized:
+            return candidate
+
+    # 4) Fuzzy alias match, e.g. "alpha_bot" -> "Alpha-01"
+    base = _base_bot_identifier(bot_identifier)
+    if base:
+        fuzzy_matches: list[models.Bot] = []
+        for candidate in candidates:
+            cand_base = _base_bot_identifier(candidate.name)
+            if not cand_base:
+                continue
+            if cand_base.startswith(base) or base.startswith(cand_base):
+                fuzzy_matches.append(candidate)
+        if len(fuzzy_matches) == 1:
+            return fuzzy_matches[0]
+    return None
+
+
+def _to_epoch_ms(ts: datetime) -> int:
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return int(ts.timestamp() * 1000)
+
+
+def _apply_trade_to_position(pos: dict, side: str, price: float, qty: float) -> float:
+    """Apply one trade to a symbol position and return realized PnL delta.
+
+    Position dict shape: {"holdings": float, "avg_cost": float}
+    Mirrors the matching engine's long/short accounting semantics.
+    """
+    holdings = float(pos.get("holdings", 0.0))
+    avg_cost = float(pos.get("avg_cost", 0.0))
+    realized_delta = 0.0
+
+    if side == "buy":
+        if holdings >= 0.0:
+            # Add to long
+            total_cost = (avg_cost * holdings) + (price * qty)
+            holdings += qty
+            avg_cost = (total_cost / holdings) if holdings > 1e-12 else 0.0
+        else:
+            # Cover short first
+            cover_qty = min(qty, -holdings)
+            realized_delta += cover_qty * (avg_cost - price)
+            holdings += qty
+            if holdings > 1e-12:
+                avg_cost = price
+            elif abs(holdings) < 1e-12:
+                holdings = 0.0
+                avg_cost = 0.0
+    else:
+        if holdings > 0.0:
+            # Close long first
+            sell_qty = min(qty, holdings)
+            realized_delta += sell_qty * (price - avg_cost)
+            holdings -= qty
+            if holdings < -1e-12:
+                avg_cost = price
+            elif abs(holdings) < 1e-12:
+                holdings = 0.0
+                avg_cost = 0.0
+        else:
+            # Add to short
+            total_proceeds = (avg_cost * (-holdings)) + (price * qty)
+            holdings -= qty
+            avg_cost = (total_proceeds / (-holdings)) if abs(holdings) > 1e-12 else 0.0
+
+    pos["holdings"] = holdings
+    pos["avg_cost"] = avg_cost
+    return realized_delta
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -65,23 +167,30 @@ def get_bots(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
 
 @app.get("/api/bots/{bot_id}/trades", response_model=List[schemas.TradeResponse])
 def get_bot_trades(bot_id: str, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    bot = db.query(models.Bot).filter(models.Bot.id == bot_id).first()
+    bot = resolve_bot(db, bot_id)
     if not bot:
         raise HTTPException(status_code=404, detail="Bot not found")
-        
-    trades = db.query(models.Trade).filter(models.Trade.bot_id == bot_id).order_by(models.Trade.timestamp.desc()).offset(skip).limit(limit).all()
+
+    trades = (
+        db.query(models.Trade)
+        .filter(models.Trade.bot_id == bot.id)
+        .order_by(models.Trade.timestamp.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     return trades
 
 @app.get("/api/bots/{bot_id}/portfolio")
 def get_bot_portfolio(bot_id: str, db: Session = Depends(get_db)):
-    bot = db.query(models.Bot).filter(models.Bot.id == bot_id).first()
+    bot = resolve_bot(db, bot_id)
     if not bot:
         raise HTTPException(status_code=404, detail="Bot not found")
-        
-    # Compute portfolio dynamically from trades
-    trades = db.query(models.Trade).filter(models.Trade.bot_id == bot_id).all()
 
-    portfolio_record = db.query(models.Portfolio).filter(models.Portfolio.bot_id == bot_id).first()
+    # Compute portfolio dynamically from trades
+    trades = db.query(models.Trade).filter(models.Trade.bot_id == bot.id).all()
+
+    portfolio_record = db.query(models.Portfolio).filter(models.Portfolio.bot_id == bot.id).first()
     initial_capital = (portfolio_record.initial_capital if portfolio_record and portfolio_record.initial_capital else 100000.0)
     cash_balance = initial_capital
     positions = {}
@@ -111,11 +220,11 @@ async def deposit_funds(bot_id: str, req: schemas.DepositRequest, db: Session = 
     if req.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be positive")
 
-    bot = db.query(models.Bot).filter(models.Bot.id == bot_id).first()
+    bot = resolve_bot(db, bot_id)
     if not bot:
         raise HTTPException(status_code=404, detail="Bot not found")
 
-    portfolio = db.query(models.Portfolio).filter(models.Portfolio.bot_id == bot_id).first()
+    portfolio = db.query(models.Portfolio).filter(models.Portfolio.bot_id == bot.id).first()
     if not portfolio:
         raise HTTPException(status_code=404, detail="Portfolio not found")
 
@@ -125,10 +234,10 @@ async def deposit_funds(bot_id: str, req: schemas.DepositRequest, db: Session = 
     db.refresh(portfolio)
 
     # Notify the C++ engine to update in-memory portfolio
-    await deposit_queue.put({"bot_id": bot_id, "amount": req.amount})
+    await deposit_queue.put({"bot_id": bot.id, "amount": req.amount})
 
     # Recompute current cash for response
-    trades = db.query(models.Trade).filter(models.Trade.bot_id == bot_id).all()
+    trades = db.query(models.Trade).filter(models.Trade.bot_id == bot.id).all()
     cash = portfolio.initial_capital
     for t in trades:
         value = t.price * t.qty
@@ -138,7 +247,95 @@ async def deposit_funds(bot_id: str, req: schemas.DepositRequest, db: Session = 
             cash += value
 
     return schemas.DepositResponse(
-        bot_id=bot_id,
+        bot_id=bot.id,
         amount=req.amount,
         new_cash_balance=round(cash, 2)
     )
+
+
+@app.get("/api/bots/{bot_id}/pnl")
+def get_bot_pnl(bot_id: str, period: str = "7d", db: Session = Depends(get_db)):
+    period_map = {
+        "1d": timedelta(days=1),
+        "7d": timedelta(days=7),
+        "30d": timedelta(days=30),
+    }
+    if period not in period_map:
+        raise HTTPException(status_code=400, detail="Invalid period. Use one of: 1d, 7d, 30d")
+
+    bot = resolve_bot(db, bot_id)
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot not found")
+
+    portfolio_record = db.query(models.Portfolio).filter(models.Portfolio.bot_id == bot.id).first()
+    initial_capital = (
+        portfolio_record.initial_capital
+        if portfolio_record and portfolio_record.initial_capital is not None
+        else 100000.0
+    )
+
+    trades = (
+        db.query(models.Trade)
+        .filter(models.Trade.bot_id == bot.id)
+        .order_by(models.Trade.timestamp.asc())
+        .all()
+    )
+
+    now_utc = datetime.now(timezone.utc)
+    cutoff = now_utc - period_map[period]
+
+    cash_balance = float(initial_capital)
+    positions: dict[str, dict] = {}
+    realized_pnl = 0.0
+
+    history: list[dict] = []
+    for t in trades:
+        side = (t.side or "").lower()
+        qty = float(t.qty)
+        price = float(t.price)
+        symbol = t.symbol
+        notional = price * qty
+
+        if side == "buy":
+            cash_balance -= notional
+        else:
+            cash_balance += notional
+
+        if symbol not in positions:
+            positions[symbol] = {"holdings": 0.0, "avg_cost": 0.0}
+        realized_pnl += _apply_trade_to_position(positions[symbol], side, price, qty)
+
+        trade_ts = t.timestamp
+        if trade_ts.tzinfo is None:
+            trade_ts = trade_ts.replace(tzinfo=timezone.utc)
+
+        if trade_ts >= cutoff:
+            pnl = realized_pnl
+            equity = float(initial_capital) + pnl
+            history.append(
+                {
+                    "timestamp": _to_epoch_ms(trade_ts),
+                    "pnl": round(pnl, 2),
+                    "equity": round(equity, 2),
+                }
+            )
+
+    current_pnl = realized_pnl
+    total_equity = float(initial_capital) + current_pnl
+
+    # Always provide at least one point for charting in no-trade windows.
+    if not history:
+        history = [
+            {
+                "timestamp": _to_epoch_ms(now_utc),
+                "pnl": round(current_pnl, 2),
+                "equity": round(total_equity, 2),
+            }
+        ]
+
+    return {
+        "bot_id": bot.id,
+        "current_pnl": round(current_pnl, 2),
+        "total_equity": round(total_equity, 2),
+        "history": history,
+    }

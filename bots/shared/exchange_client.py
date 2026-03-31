@@ -34,20 +34,21 @@ class ExchangeClient:
             try:
                 async with websockets.connect(EXCHANGE_WS_URL) as ws:
                     self._ws = ws
+                    self._connected.clear()
                     
                     # Immediately send auth message
                     await ws.send(json.dumps({
                         "type": "auth",
                         "api_key": BOT_API_KEY
                     }))
-                    
-                    self._connected.set()
+
                     backoff = 1
 
                     is_reconnect = not self._first_connect
                     self._first_connect = False
 
-                    print(f"[ExchangeClient] Connected to {EXCHANGE_WS_URL} and authenticated")
+                    key_prefix = f"{BOT_API_KEY[:12]}..." if BOT_API_KEY else "<empty>"
+                    print(f"[ExchangeClient] Connected to {EXCHANGE_WS_URL}; auth sent (key={key_prefix})")
 
                     if is_reconnect and self.on_reconnect:
                         try:
@@ -71,10 +72,19 @@ class ExchangeClient:
         async for raw in ws:
             try:
                 msg = json.loads(raw)
-                if msg.get("type") == "welcome":
+                msg_type = msg.get("type")
+                if msg_type == "welcome":
                     self.user_id = msg.get("user_id")
                     for entry in msg.get("symbols", []):
                         self._symbol_prices[entry["symbol"]] = entry["price"]
+                    self._connected.set()
+                    print(f"[ExchangeClient] Authenticated as user_id={self.user_id}")
+                elif msg_type == "auth_success":
+                    self._connected.set()
+                    print("[ExchangeClient] Authenticated as admin")
+                elif msg_type == "error" and msg.get("message") == "Invalid API key":
+                    self._connected.clear()
+                    print("[ExchangeClient] Invalid API key from exchange")
                 await self.on_message(msg)
             except Exception as e:
                 print(f"[ExchangeClient] Message error: {e}")

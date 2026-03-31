@@ -31,6 +31,13 @@ class OrderTracker:
         self._pending_acks += 1
         self._sent_sides.append(side)
 
+    def on_reject(self):
+        """Clear one pending sent order when the exchange rejects it with an error."""
+        if self._pending_acks > 0:
+            self._pending_acks -= 1
+        if self._sent_sides:
+            self._sent_sides.popleft()
+
     def get_all_ids(self) -> list[int]:
         return list(self._active.keys())
 

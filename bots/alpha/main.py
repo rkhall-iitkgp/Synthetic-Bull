@@ -62,6 +62,7 @@ class AlphaBot:
         self._pending_entry_qty: float = 0.0
         self._pending_entry_price: float = 0.0
         self._pending_entry_side: str = "long"
+        self._pending_entry_awaiting_portfolio: bool = False
         self._candle_count: int = 0
         self._warmup_logged: bool = False
         self._initial_sync_done: bool = False
@@ -118,6 +119,7 @@ class AlphaBot:
 
         if t == "portfolio":
             self.risk.on_portfolio_update(msg)
+            await self._sync_entry_after_portfolio()
             return
 
         if t == "open_orders":
@@ -127,7 +129,17 @@ class AlphaBot:
             return
 
         if t == "error":
-            print(f"[AlphaBot] Exchange error: {msg.get('message')}")
+            err = msg.get("message")
+            print(f"[AlphaBot] Exchange error: {err}")
+            if self._waiting_for_entry_ack:
+                self._waiting_for_entry_ack = False
+                self._pending_entry_qty = 0.0
+                self._pending_entry_price = 0.0
+                self._pending_entry_side = "long"
+                self._pending_entry_awaiting_portfolio = False
+            elif self._waiting_for_tp_ack:
+                # Keep position open but clear TP wait so we can retry on the next portfolio update.
+                self._waiting_for_tp_ack = False
             return
 
         if t == "pong":
@@ -185,6 +197,7 @@ class AlphaBot:
         self._pending_entry_qty = 0.0
         self._pending_entry_price = 0.0
         self._pending_entry_side = "long"
+        self._pending_entry_awaiting_portfolio = False
         self._candle_count = 0
         self._warmup_logged = False
         self._initial_sync_done = False
@@ -334,24 +347,42 @@ class AlphaBot:
             self._pending_entry_side = "long"
 
         elif signal["decision"] == "SELL":
-            qty = self.risk.calculate_size(
-                price,
-                signal["signal"],
-                self.drawdown.is_halted(),
-                prices,
-            )
-            if qty <= 0:
-                return
+            # Exchange enforces spot holdings for sells, so do not open naked shorts.
+            return
 
-            print(
-                f"[AlphaBot] SHORT entry | regime={regime} "
-                f"signal={signal['signal']:.3f} qty={qty:.4f} @ ~{price:.2f}"
-            )
-            await self.client.place_market(self.symbol, "sell", qty)
-            self._waiting_for_entry_ack = True
-            self._pending_entry_qty = qty
-            self._pending_entry_price = price
-            self._pending_entry_side = "short"
+    async def _sync_entry_after_portfolio(self):
+        if not self._pending_entry_awaiting_portfolio:
+            return
+        if self.risk.get_position() is not None:
+            self._pending_entry_awaiting_portfolio = False
+            return
+
+        if self._pending_entry_side != "long":
+            self._pending_entry_awaiting_portfolio = False
+            return
+
+        available_qty = self.risk.get_server_holdings()
+        qty = min(self._pending_entry_qty, available_qty)
+        if qty <= 0:
+            return
+
+        self.risk.open_position(
+            self._pending_entry_price,
+            qty,
+            tp_order_id=None,
+            side="long",
+        )
+
+        tp_price = self._pending_entry_price * (1.0 + ALPHA_TP_PCT)
+        await self.client.place_limit(self.symbol, "sell", tp_price, qty)
+        self._waiting_for_tp_ack = True
+        self._pending_entry_qty = qty
+        self._pending_entry_awaiting_portfolio = False
+
+        print(
+            f"[AlphaBot] Position opened: LONG qty={qty:.4f} @ {self._pending_entry_price:.2f}; "
+            f"placing TP @ {tp_price:.2f}"
+        )
 
     async def _on_ack(self, msg: dict):
         fills = int(msg.get("fills", 0))
@@ -359,33 +390,22 @@ class AlphaBot:
 
         if self._waiting_for_entry_ack and fills > 0:
             self._waiting_for_entry_ack = False
-            self._waiting_for_tp_ack = True
             entry_price = self.latest_mid if self.latest_mid > 0 else self._pending_entry_price
             self._pending_entry_price = entry_price
-
-            # Place take-profit in the opposite direction
-            if self._pending_entry_side == "long":
-                tp_price = entry_price * (1.0 + ALPHA_TP_PCT)
-                await self.client.place_limit(self.symbol, "sell", tp_price, self._pending_entry_qty)
-            else:
-                tp_price = entry_price * (1.0 - ALPHA_TP_PCT)
-                await self.client.place_limit(self.symbol, "buy", tp_price, self._pending_entry_qty)
+            # Wait for the post-fill portfolio update so TP uses actual holdings.
+            self._pending_entry_awaiting_portfolio = True
             return
 
         if self._waiting_for_tp_ack:
             self._waiting_for_tp_ack = False
             self.pending_tp_order_id = order_id
-            self.risk.open_position(
-                self._pending_entry_price,
-                self._pending_entry_qty,
-                self.pending_tp_order_id,
-                side=self._pending_entry_side,
-            )
-            print(
-                f"[AlphaBot] Position opened: {self._pending_entry_side.upper()} "
-                f"qty={self._pending_entry_qty:.4f} @ {self._pending_entry_price:.2f} "
-                f"TP order={self.pending_tp_order_id}"
-            )
+            position = self.risk.get_position()
+            if position is not None:
+                position.tp_order_id = self.pending_tp_order_id
+                print(
+                    f"[AlphaBot] TP confirmed: order={self.pending_tp_order_id} "
+                    f"for {position.side.upper()} qty={position.quantity:.4f}"
+                )
             self._pending_entry_qty = 0.0
             self._pending_entry_price = 0.0
 

@@ -99,7 +99,16 @@ class MarketMakerBot:
                 f"cancelled={len(old_ids)}"
             )
 
-            if not is_too_long:
+            can_place_bid = (
+                not is_too_long
+                and self.inventory.cash >= quotes["bid_price"] * quotes["bid_qty"]
+            )
+            can_place_ask = (
+                not is_too_short
+                and self.inventory.holdings >= quotes["ask_qty"]
+            )
+
+            if can_place_bid:
                 await self.client.place_limit(
                     self.symbol,
                     "buy",
@@ -108,7 +117,7 @@ class MarketMakerBot:
                 )
                 self.tracker.register_sent("bid")
 
-            if not is_too_short:
+            if can_place_ask:
                 await self.client.place_limit(
                     self.symbol,
                     "sell",
@@ -116,6 +125,12 @@ class MarketMakerBot:
                     quotes["ask_qty"],
                 )
                 self.tracker.register_sent("ask")
+
+            if not can_place_bid and not can_place_ask:
+                print(
+                    f"[MMBot] Requote skipped: cash={self.inventory.cash:.2f}, "
+                    f"holdings={self.inventory.holdings:.4f}"
+                )
 
             self.last_mid_quoted = self.latest_mid
 
@@ -153,6 +168,7 @@ class MarketMakerBot:
 
         if t == "error":
             print(f"[MMBot] Exchange error: {msg.get('message')}")
+            self.tracker.on_reject()
             return
 
         if t == "pong":
