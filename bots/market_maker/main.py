@@ -92,11 +92,14 @@ class MarketMakerBot:
 
             quotes = self.spread.compute(self.latest_mid, skew, is_too_long, is_too_short)
 
+            # Check if we actually have enough holdings to sell
+            can_sell = not is_too_short and self.inventory.holdings >= quotes["ask_qty"] - 1e-8
+
             print(
                 f"[MMBot] Requote: mid={self.latest_mid:.2f} skew={skew:.2f} "
                 f"bid={quotes['bid_price']:.2f}x{quotes['bid_qty']:.4f} "
                 f"ask={quotes['ask_price']:.2f}x{quotes['ask_qty']:.4f} "
-                f"cancelled={len(old_ids)}"
+                f"cancelled={len(old_ids)} can_sell={can_sell}"
             )
 
             if not is_too_long:
@@ -108,7 +111,7 @@ class MarketMakerBot:
                 )
                 self.tracker.register_sent("bid")
 
-            if not is_too_short:
+            if can_sell:
                 await self.client.place_limit(
                     self.symbol,
                     "sell",
@@ -153,6 +156,9 @@ class MarketMakerBot:
 
         if t == "error":
             print(f"[MMBot] Exchange error: {msg.get('message')}")
+            # Clear pending acks so the bot doesn't get stuck waiting
+            # for an ack that will never come (e.g. rejected sell orders)
+            self.tracker.clear_pending()
             return
 
         if t == "pong":

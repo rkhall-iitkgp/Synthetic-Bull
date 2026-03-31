@@ -45,6 +45,11 @@ class OrderTracker:
     def has_pending(self) -> bool:
         return self._pending_acks > 0
 
+    def clear_pending(self):
+        """Reset pending ack counter (e.g. after an order rejection error)."""
+        self._pending_acks = 0
+        self._sent_sides.clear()
+
     def count(self) -> int:
         return len(self._active)
 
