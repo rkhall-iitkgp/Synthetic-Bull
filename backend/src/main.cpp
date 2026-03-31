@@ -153,9 +153,6 @@ static std::mutex g_open_orders_mutex;
 static std::deque<sb::Trade> g_trade_queue;
 static std::mutex g_trade_mutex;
 
-// User counter for assigning IDs
-static std::atomic<int> g_user_counter{0};
-
 // uWS loop pointer (set once in main)
 static uWS::Loop* g_loop = nullptr;
 
@@ -597,13 +594,47 @@ int main() {
                     g_portfolios["sim_bot"] = sb::Portfolio{};
                 }
             }
+
+            // Bootstrap dashboard immediately so refresh reuses the same in-memory user state.
+            json symbols_json = json::array();
+            g_exchange.forEachSymbol([&](const std::string& sym, sb::SymbolState& state) {
+                symbols_json.push_back({
+                    {"symbol", sym},
+                    {"price",  std::round(state.simulator->currentPrice() * 100.0) / 100.0}
+                });
+            });
+
+            json welcome = {
+                {"type", "welcome"},
+                {"user_id", "sim_bot"},
+                {"symbols", symbols_json}
+            };
+            ws->send(welcome.dump(), uWS::OpCode::TEXT);
+
+            g_exchange.forEachSymbol([&](const std::string& sym, sb::SymbolState& state) {
+                auto snap = state.engine->getSnapshot(20);
+                ws->send(obSnapshotToJson(sym, snap).dump(), uWS::OpCode::TEXT);
+                auto candles = state.candles->getHistory(200);
+                for (auto& c : candles) {
+                    ws->send(candleToJson(sym, c).dump(), uWS::OpCode::TEXT);
+                }
+            });
+
+            {
+                std::lock_guard<std::mutex> lock(g_portfolio_mutex);
+                auto it = g_portfolios.find("sim_bot");
+                if (it != g_portfolios.end()) {
+                    ws->send(portfolioToJson(it->second).dump(), uWS::OpCode::TEXT);
+                }
+            }
+            ws->send(openOrdersToJson("sim_bot").dump(), uWS::OpCode::TEXT);
         },
 
         // ── on message ──
         .message = [](auto* ws, std::string_view message, uWS::OpCode) {
             auto* data = ws->getUserData();
             const std::string& uid = data->user_id;
-
+            
             json req;
             try {
                 req = json::parse(message);
