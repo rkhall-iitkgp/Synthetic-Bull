@@ -19,7 +19,7 @@ from market_maker.order_tracker import OrderTracker
 from market_maker.spread_calculator import SpreadCalculator
 from market_maker.status_server import run as run_status_server
 from market_maker.status_server import update_status
-from shared.config import MM_REQUOTE_INTERVAL, MM_SYMBOL, PNL_FLOOR, STARTING_EQUITY
+from shared.config import MM_QUOTE_QTY, MM_REQUOTE_INTERVAL, MM_SYMBOL, PNL_FLOOR, STARTING_EQUITY
 from shared.exchange_client import ExchangeClient
 
 
@@ -39,6 +39,7 @@ class MarketMakerBot:
         self._requote_lock: asyncio.Lock = asyncio.Lock()
         self._halted: bool = False
         self._initial_sync_done: bool = False
+        self._seed_order_sent: bool = False
 
     async def run(self):
         await asyncio.gather(
@@ -55,6 +56,7 @@ class MarketMakerBot:
         self.tracker.clear()
         self.last_mid_quoted = 0.0
         self._initial_sync_done = False
+        self._seed_order_sent = False
 
     async def _requote_loop(self):
         await self.client.wait_until_connected()
@@ -74,6 +76,15 @@ class MarketMakerBot:
             if self.tracker.has_pending():
                 return
             if self._halted:
+                return
+
+            # Bootstrap inventory once so we can quote both sides.
+            # Without this, the bot can stay one-sided (buy-only) for long periods and show no fills.
+            if (not self._seed_order_sent) and (self.inventory.holdings < MM_QUOTE_QTY * 0.5):
+                seed_qty = max(0.001, round(MM_QUOTE_QTY, 4))
+                print(f"[MMBot] Bootstrap inventory via market buy qty={seed_qty:.4f}")
+                await self.client.place_market(self.symbol, "buy", seed_qty)
+                self._seed_order_sent = True
                 return
 
             # CANCEL old orders first
@@ -203,6 +214,7 @@ class MarketMakerBot:
         self.last_mid_quoted = 0.0
         self._halted = False
         self._initial_sync_done = False
+        self._seed_order_sent = False
         self.kpi.record_equity(STARTING_EQUITY)
         self._update_status()
 

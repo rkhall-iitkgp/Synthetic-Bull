@@ -26,12 +26,18 @@ class ExchangeClient:
         self._send_queue: asyncio.Queue = asyncio.Queue()
         self._connected = asyncio.Event()
         self._first_connect = True
+        self._auth_announced_for_uid: str | None = None
+        self._warned_missing_key = False
 
     async def run(self):
         """Connect loop with exponential backoff. Never returns."""
         backoff = 1
         while True:
             try:
+                if not BOT_API_KEY and not self._warned_missing_key:
+                    print("[ExchangeClient] WARNING: BOT_API_KEY is empty. Server will keep this client as sim_bot.")
+                    self._warned_missing_key = True
+
                 async with websockets.connect(EXCHANGE_WS_URL) as ws:
                     self._ws = ws
                     
@@ -47,7 +53,7 @@ class ExchangeClient:
                     is_reconnect = not self._first_connect
                     self._first_connect = False
 
-                    print(f"[ExchangeClient] Connected to {EXCHANGE_WS_URL} and authenticated")
+                    print(f"[ExchangeClient] Connected to {EXCHANGE_WS_URL}; auth request sent")
 
                     if is_reconnect and self.on_reconnect:
                         try:
@@ -75,6 +81,14 @@ class ExchangeClient:
                     self.user_id = msg.get("user_id")
                     for entry in msg.get("symbols", []):
                         self._symbol_prices[entry["symbol"]] = entry["price"]
+                    if BOT_API_KEY and self.user_id and self.user_id != "sim_bot":
+                        if self._auth_announced_for_uid != self.user_id:
+                            print(f"[ExchangeClient] Authenticated as {self.user_id}")
+                            self._auth_announced_for_uid = self.user_id
+                elif msg.get("type") == "error":
+                    message = msg.get("message", "")
+                    if "Invalid API key" in message:
+                        print("[ExchangeClient] Authentication failed: invalid BOT_API_KEY")
                 await self.on_message(msg)
             except Exception as e:
                 print(f"[ExchangeClient] Message error: {e}")
