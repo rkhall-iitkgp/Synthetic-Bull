@@ -22,6 +22,131 @@ async def broadcast_to_clients(data):
         except:
             pass
 
+def process_trade_fifo(db: Session, trade: models.Trade):
+    # Find active sessions to attribute PnL
+    active_sessions = db.query(models.BotSession).filter(
+        models.BotSession.bot_id == trade.bot_id,
+        models.BotSession.status == "active"
+    ).all()
+    
+    # Assign session_id to the trade if it's part of a lap, or fallback to connection
+    lap = next((s for s in active_sessions if s.session_type == "lap"), None)
+    conn = next((s for s in active_sessions if s.session_type == "connection"), None)
+    if lap:
+        trade.session_id = lap.id
+    elif conn:
+        trade.session_id = conn.id
+        
+    opp_side = "sell" if trade.side == "buy" else "buy"
+    
+    # Get previous open trades to match against
+    open_ops = db.query(models.Trade).filter(
+        models.Trade.bot_id == trade.bot_id,
+        models.Trade.symbol == trade.symbol,
+        models.Trade.side == opp_side,
+        models.Trade.unclosed_qty > 0
+    ).order_by(models.Trade.timestamp.asc()).all()
+
+    for opp in open_ops:
+        if trade.unclosed_qty <= 0:
+            break
+            
+        match_qty = min(trade.unclosed_qty, opp.unclosed_qty)
+        trade.unclosed_qty -= match_qty
+        opp.unclosed_qty -= match_qty
+        
+        # Calculate PnL
+        if trade.side == "buy": # Covering a short
+            pnl = (opp.price - trade.price) * match_qty
+            pct = 0.0 if opp.price == 0 else (opp.price - trade.price) / opp.price
+            side_label = "short"
+        else: # Closing a long
+            pnl = (trade.price - opp.price) * match_qty
+            pct = 0.0 if opp.price == 0 else (trade.price - opp.price) / opp.price
+            side_label = "long"
+            
+        rnd = models.TradeRound(
+            bot_id=trade.bot_id,
+            session_id=trade.session_id,
+            symbol=trade.symbol,
+            side=side_label,
+            entry_price=opp.price,
+            exit_price=trade.price,
+            qty=match_qty,
+            pnl=pnl,
+            pct_return=pct
+        )
+        db.add(rnd)
+        
+        # Add realized PnL to all active sessions
+        for s in active_sessions:
+            s.realized_pnl += pnl
+
+    db.add(trade)
+    
+    # Update Position
+    pos = db.query(models.Position).filter(
+        models.Position.bot_id == trade.bot_id,
+        models.Position.symbol == trade.symbol
+    ).first()
+    if not pos:
+        pos = models.Position(bot_id=trade.bot_id, symbol=trade.symbol, qty=0.0, avg_entry_price=0.0)
+        db.add(pos)
+        
+    old_qty = pos.qty
+    trade_sign = 1.0 if trade.side == "buy" else -1.0
+    new_qty = old_qty + (trade.qty * trade_sign)
+    
+    # If adding to position, update avg entry price
+    if abs(new_qty) > abs(old_qty) and (old_qty * trade_sign >= 0):  # Same direction
+        total_value = abs(old_qty) * pos.avg_entry_price + trade.qty * trade.price
+        pos.avg_entry_price = total_value / abs(new_qty) if new_qty != 0 else 0.0
+    elif new_qty == 0:
+        pos.avg_entry_price = 0.0
+        pos.unrealized_pnl = 0.0
+        
+    pos.qty = new_qty
+
+def update_market_price(db: Session, symbol: str, current_price: float):
+    """
+    Updates the unrealized PnL for all bots holding this symbol,
+    then updates the high/low equity marks for their active sessions.
+    """
+    # 1. Update unrealized PnL for all active positions of this symbol
+    positions = db.query(models.Position).filter(
+        models.Position.symbol == symbol,
+        models.Position.qty != 0
+    ).all()
+    
+    if not positions:
+        return
+
+    # Track which bots were affected so we only update their sessions
+    affected_bot_ids = set()
+    for pos in positions:
+        pos.unrealized_pnl = pos.qty * (current_price - pos.avg_entry_price)
+        affected_bot_ids.add(pos.bot_id)
+        
+    # 2. Update equity watermark for active sessions of affected bots
+    active_sessions = db.query(models.BotSession).filter(
+        models.BotSession.status == "active",
+        models.BotSession.bot_id.in_(affected_bot_ids)
+    ).all()
+    
+    for session in active_sessions:
+        # Sum total unrealized pnl for this specific bot
+        bot_positions = db.query(models.Position).filter(
+            models.Position.bot_id == session.bot_id
+        ).all()
+        total_unrealized = sum(p.unrealized_pnl for p in bot_positions)
+        
+        current_equity = session.starting_equity + session.realized_pnl + total_unrealized
+        
+        if current_equity > session.max_equity:
+            session.max_equity = current_equity
+        if current_equity < session.min_equity:
+            session.min_equity = current_equity
+
 async def logger_worker():
     while True:
         try:
@@ -62,13 +187,12 @@ async def logger_worker():
 
                             trade = models.Trade(
                                 id=trade_id + "_buy",
-                                bot_id=data["buyer"],  # We record buyer and seller?
-                                # The spec says trade needs bot_id, but a trade has a buyer and a seller.
-                                # We can insert two records or adjust Schema. Let's insert two for PnL tracking, or just update the portfolio.
+                                bot_id=data["buyer"],
                                 symbol=data["symbol"],
-                                side="buy", # this is relative to 'buyer'       
+                                side="buy",
                                 price=data["price"],
                                 qty=data["qty"],
+                                unclosed_qty=data["qty"],
                                 timestamp=datetime.fromtimestamp(data["ts"] / 1000000.0, tz=timezone.utc)
                             )
                             trade2 = models.Trade(
@@ -78,14 +202,19 @@ async def logger_worker():
                                 side="sell",
                                 price=data["price"],
                                 qty=data["qty"],
+                                unclosed_qty=data["qty"],
                                 timestamp=datetime.fromtimestamp(data["ts"] / 1000000.0, tz=timezone.utc)
                             )
 
-                            # Only add trades for real bots, ignore "sim_bot"   
                             if data["buyer"] != "sim_bot":
+                                process_trade_fifo(db, trade)
                                 batch.append(trade)
                             if data["seller"] != "sim_bot":
+                                process_trade_fifo(db, trade2)
                                 batch.append(trade2)
+
+                            # Trigger market price mark-to-market updates for tracking equity & drawdown
+                            update_market_price(db, data["symbol"], data["price"])
 
                     except asyncio.TimeoutError:
                         pass # Proceed to flush
@@ -112,7 +241,6 @@ async def logger_worker():
                                 print(f"[Worker] Committing batch of {len(batch)} trades...")
                                 for b in batch:
                                     print(f"  - {b.id} | bot: {b.bot_id} | side: {b.side} | qty: {b.qty}")
-                                db.bulk_save_objects(batch)
                                 db.commit()
                             except Exception as e:
                                 db.rollback()

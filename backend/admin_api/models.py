@@ -19,6 +19,44 @@ class Bot(Base):
     portfolios = relationship("Portfolio", back_populates="bot", cascade="all, delete-orphan")
     positions = relationship("Position", back_populates="bot", cascade="all, delete-orphan")
     trades = relationship("Trade", back_populates="bot", cascade="all, delete-orphan")
+    sessions = relationship("BotSession", back_populates="bot", cascade="all, delete-orphan")
+    trade_rounds = relationship("TradeRound", back_populates="bot", cascade="all, delete-orphan")
+
+class BotSession(Base):
+    __tablename__ = "bot_sessions"
+
+    id = Column(String, primary_key=True, index=True, default=generate_uuid)
+    bot_id = Column(String, ForeignKey("bots.id"))
+    session_type = Column(String)  # connection or lap
+    status = Column(String, default="active")  # active or completed
+    start_time = Column(DateTime(timezone=True), server_default=func.now())
+    end_time = Column(DateTime(timezone=True), nullable=True)
+    starting_equity = Column(Float, default=0.0)
+    max_equity = Column(Float, default=0.0)
+    min_equity = Column(Float, default=0.0)
+    realized_pnl = Column(Float, default=0.0)
+
+    bot = relationship("Bot", back_populates="sessions")
+    trades = relationship("Trade", back_populates="session")
+    trade_rounds = relationship("TradeRound", back_populates="session")
+
+class TradeRound(Base):
+    __tablename__ = "trade_rounds"
+
+    id = Column(String, primary_key=True, index=True, default=generate_uuid)
+    bot_id = Column(String, ForeignKey("bots.id"))
+    session_id = Column(String, ForeignKey("bot_sessions.id"), nullable=True)
+    symbol = Column(String, index=True)
+    side = Column(String)
+    entry_price = Column(Float)
+    exit_price = Column(Float)
+    qty = Column(Float)
+    pnl = Column(Float)
+    pct_return = Column(Float)
+    closed_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    bot = relationship("Bot", back_populates="trade_rounds")
+    session = relationship("BotSession", back_populates="trade_rounds")
 
 class Portfolio(Base):
     __tablename__ = "portfolios"
@@ -39,6 +77,7 @@ class Position(Base):
     symbol = Column(String, index=True)
     qty = Column(Float, default=0.0)
     avg_entry_price = Column(Float, default=0.0)
+    unrealized_pnl = Column(Float, default=0.0)
 
     bot = relationship("Bot", back_populates="positions")
 
@@ -47,10 +86,13 @@ class Trade(Base):
 
     id = Column(String, primary_key=True, index=True, default=generate_uuid)
     bot_id = Column(String, ForeignKey("bots.id"))
+    session_id = Column(String, ForeignKey("bot_sessions.id"), nullable=True)
     symbol = Column(String, index=True)
     side = Column(String)  # buy/sell
     price = Column(Float)
     qty = Column(Float)
+    unclosed_qty = Column(Float)  # Added for FIFO matching
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
 
     bot = relationship("Bot", back_populates="trades")
+    session = relationship("BotSession", back_populates="trades")

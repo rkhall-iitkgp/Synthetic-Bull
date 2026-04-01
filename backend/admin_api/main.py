@@ -4,10 +4,12 @@ import asyncio
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
+import datetime
 
 import models, schemas
 from database import engine, get_db
+from sqlalchemy.sql import func
 from worker import logger_worker, deposit_queue
 
 # Create database tables
@@ -31,6 +33,41 @@ async def startup_event():
 
 def generate_api_key():
     return f"sk_live_{secrets.token_hex(16)}"
+
+@app.websocket("/ws/{bot_id}")
+async def websocket_bot_endpoint(websocket: WebSocket, bot_id: str, db: Session = Depends(get_db)):
+    await websocket.accept()
+    
+    bot = db.query(models.Bot).filter(models.Bot.id == bot_id).first()
+    if not bot:
+        await websocket.close()
+        return
+
+    # Calculate starting equity
+    portfolio = db.query(models.Portfolio).filter(models.Portfolio.bot_id == bot_id).first()
+    starting_equity = portfolio.initial_capital if portfolio else 0.0
+
+    # Start connection session
+    session = models.BotSession(
+        bot_id=bot_id,
+        session_type="connection",
+        starting_equity=starting_equity,
+        max_equity=starting_equity,
+        min_equity=starting_equity
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    
+    active_connections.append(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        active_connections.remove(websocket)
+        session.status = "completed"
+        session.end_time = func.now()
+        db.commit()
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -63,13 +100,30 @@ def get_bots(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     bots = db.query(models.Bot).offset(skip).limit(limit).all()
     return bots
 
-@app.get("/api/bots/{bot_id}/trades", response_model=List[schemas.TradeResponse])
-def get_bot_trades(bot_id: str, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+@app.get("/api/bots/{bot_id}", response_model=schemas.BotResponse)
+def get_bot(bot_id: str, db: Session = Depends(get_db)):
     bot = db.query(models.Bot).filter(models.Bot.id == bot_id).first()
     if not bot:
         raise HTTPException(status_code=404, detail="Bot not found")
-        
-    trades = db.query(models.Trade).filter(models.Trade.bot_id == bot_id).order_by(models.Trade.timestamp.desc()).offset(skip).limit(limit).all()
+    return bot
+
+@app.get("/api/bots/{bot_id}/trades", response_model=List[schemas.TradeResponse])
+def get_bot_trades(
+    bot_id: str,
+    skip: int = 0,
+    limit: int = 100,
+    session_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    bot = db.query(models.Bot).filter(models.Bot.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot not found")
+
+    query = db.query(models.Trade).filter(models.Trade.bot_id == bot_id)
+    if session_id:
+        query = query.filter(models.Trade.session_id == session_id)
+
+    trades = query.order_by(models.Trade.timestamp.desc()).offset(skip).limit(limit).all()
     return trades
 
 @app.get("/api/bots/{bot_id}/portfolio")
@@ -105,6 +159,69 @@ def get_bot_portfolio(bot_id: str, db: Session = Depends(get_db)):
         "initial_capital": round(initial_capital, 2),
         "positions": position_list
     }
+
+@app.get("/api/bots/{bot_id}/kpi", response_model=schemas.BotKPIResponse)
+def get_bot_kpi(bot_id: str, session_id: Optional[str] = None, db: Session = Depends(get_db)):
+    bot = db.query(models.Bot).filter(models.Bot.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot not found")
+
+    import numpy as np
+
+    if session_id:
+        trade_rounds = db.query(models.TradeRound).filter(
+            models.TradeRound.bot_id == bot_id,
+            models.TradeRound.session_id == session_id
+        ).all()
+        session = db.query(models.BotSession).filter(
+            models.BotSession.id == session_id,
+            models.BotSession.bot_id == bot_id
+        ).first()
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        max_eq = session.max_equity or 1.0
+        min_eq = session.min_equity or 1.0
+        drawdown = 0.0 if max_eq <= 0 else (max_eq - min_eq) / max_eq
+    else:
+        trade_rounds = db.query(models.TradeRound).filter(
+            models.TradeRound.bot_id == bot_id
+        ).all()
+
+        # For overall drawdown, query the aggregated sessions.
+        sessions = db.query(models.BotSession).filter(models.BotSession.bot_id == bot_id).all()
+        if not sessions:
+            drawdown = 0.0
+        else:
+            max_eq = max((s.max_equity for s in sessions if s.max_equity), default=1.0)
+            min_eq = min((s.min_equity for s in sessions if s.min_equity), default=1.0)
+            drawdown = 0.0 if max_eq <= 0 else (max_eq - min_eq) / max_eq
+
+    # Realized PnL should come from closed trade rounds, not session aggregates.
+    realized_pnl = float(sum(t.pnl for t in trade_rounds))
+
+    total_trades = len(trade_rounds)
+    win_rate = 0.0
+    sharpe_ratio = 0.0
+
+    if total_trades > 0:
+        winning_trades = sum(1 for t in trade_rounds if t.pnl > 0)
+        win_rate = winning_trades / total_trades
+        
+        returns = [t.pct_return for t in trade_rounds]
+        std = np.std(returns, ddof=1) if len(returns) > 1 else 0.0
+        if std > 0:
+            mean_ret = np.mean(returns)
+            sharpe_ratio = (mean_ret / std) * np.sqrt(len(returns))
+
+    return schemas.BotKPIResponse(
+        bot_id=bot_id,
+        session_id=session_id,
+        total_trades=total_trades,
+        win_rate=win_rate,
+        realized_pnl=realized_pnl,
+        sharpe_ratio=sharpe_ratio,
+        max_drawdown=drawdown
+    )
 
 @app.post("/api/bots/{bot_id}/deposit", response_model=schemas.DepositResponse)
 async def deposit_funds(bot_id: str, req: schemas.DepositRequest, db: Session = Depends(get_db)):
@@ -142,3 +259,57 @@ async def deposit_funds(bot_id: str, req: schemas.DepositRequest, db: Session = 
         amount=req.amount,
         new_cash_balance=round(cash, 2)
     )
+
+@app.post("/api/bots/{bot_id}/sessions/start", response_model=schemas.BotSessionResponse)
+def start_lap_session(bot_id: str, db: Session = Depends(get_db)):
+    bot = db.query(models.Bot).filter(models.Bot.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot not found")
+
+    active_lap = db.query(models.BotSession).filter(
+        models.BotSession.bot_id == bot_id,
+        models.BotSession.session_type == "lap",
+        models.BotSession.status == "active"
+    ).first()
+
+    if active_lap:
+        raise HTTPException(status_code=400, detail="A lap session is already active for this bot.")
+
+    portfolio = db.query(models.Portfolio).filter(models.Portfolio.bot_id == bot_id).first()
+    starting_equity = portfolio.initial_capital if portfolio else 0.0
+
+    session = models.BotSession(
+        bot_id=bot_id,
+        session_type="lap",
+        starting_equity=starting_equity,
+        max_equity=starting_equity,
+        min_equity=starting_equity
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    
+    return session
+
+@app.post("/api/bots/{bot_id}/sessions/stop", response_model=schemas.BotSessionResponse)
+def stop_lap_session(bot_id: str, db: Session = Depends(get_db)):
+    session = db.query(models.BotSession).filter(
+        models.BotSession.bot_id == bot_id,
+        models.BotSession.session_type == "lap",
+        models.BotSession.status == "active"
+    ).first()
+
+    if not session:
+        raise HTTPException(status_code=404, detail="No active lap session found to stop.")
+
+    session.status = "completed"
+    session.end_time = func.now()
+    db.commit()
+    db.refresh(session)
+    
+    return session
+
+@app.get("/api/bots/{bot_id}/sessions", response_model=List[schemas.BotSessionResponse])
+def get_bot_sessions(bot_id: str, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    sessions = db.query(models.BotSession).filter(models.BotSession.bot_id == bot_id).order_by(models.BotSession.start_time.desc()).offset(skip).limit(limit).all()
+    return sessions

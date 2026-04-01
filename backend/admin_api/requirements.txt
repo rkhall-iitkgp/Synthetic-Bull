@@ -6,3 +6,4 @@ python-dotenv
 asyncio
 websockets
 python-dateutil
+numpy
