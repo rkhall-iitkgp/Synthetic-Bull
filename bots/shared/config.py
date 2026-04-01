@@ -43,7 +43,7 @@ MM_REQUOTE_INTERVAL = float(os.getenv("MM_REQUOTE_INTERVAL", "0.5"))
 MM_MAX_ORDERS = int(os.getenv("MM_MAX_ORDERS", "10"))
 
 # Symbol selection
-ALPHA_SYMBOL = os.getenv("ALPHA_SYMBOL", "BTC")
+ALPHA_SYMBOL = os.getenv("ALPHA_SYMBOL", "AAPL")
 MM_SYMBOL = os.getenv("MM_SYMBOL", "AAPL")
 
 # Minimum order quantity per symbol
