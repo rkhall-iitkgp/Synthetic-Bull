@@ -19,8 +19,17 @@ from market_maker.order_tracker import OrderTracker
 from market_maker.spread_calculator import SpreadCalculator
 from market_maker.status_server import run as run_status_server
 from market_maker.status_server import update_status
-from shared.config import MM_REQUOTE_INTERVAL, MM_SYMBOL, PNL_FLOOR, STARTING_EQUITY
+from shared.config import (
+    MM_REQUOTE_INTERVAL,
+    MM_SYMBOL,
+    PNL_FLOOR,
+    STARTING_EQUITY,
+    BOT_ID,
+    API_BASE,
+    KPI_SYNC_INTERVAL,
+)
 from shared.exchange_client import ExchangeClient
+from shared.kpi_syncer import KPISyncWorker
 
 
 class MarketMakerBot:
@@ -34,6 +43,11 @@ class MarketMakerBot:
         self.spread = SpreadCalculator()
         self.tracker = OrderTracker()
         self.kpi = MMKPITracker()
+        
+        # KPI sync worker
+        self.kpi_syncer = KPISyncWorker(BOT_ID, KPI_SYNC_INTERVAL, API_BASE)
+        self.kpi_syncer.set_tracker(self.kpi, "mm")
+        
         self.latest_mid: float = 0.0
         self.last_mid_quoted: float = 0.0
         self._requote_lock: asyncio.Lock = asyncio.Lock()
@@ -41,10 +55,12 @@ class MarketMakerBot:
         self._initial_sync_done: bool = False
 
     async def run(self):
+        print(f"[MMBot] Starting KPI sync worker for bot {BOT_ID} (interval={KPI_SYNC_INTERVAL}s)")
         await asyncio.gather(
             self.client.run(),
             self._requote_loop(),
             run_status_server(),
+            self.kpi_syncer.run(),
         )
 
     async def _on_reconnect(self):

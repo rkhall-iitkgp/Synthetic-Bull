@@ -144,11 +144,55 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         active_connections.remove(websocket)
 
+@app.post("/api/strategies", response_model=schemas.BotStrategyResponse)
+def create_strategy(strategy: schemas.BotStrategyCreate, db: Session = Depends(get_db)):
+    """Create a new bot strategy template"""
+    db_strategy = models.BotStrategy(
+        name=strategy.name,
+        strategy_type=strategy.strategy_type,
+        config=strategy.config or {}
+    )
+    db.add(db_strategy)
+    db.commit()
+    db.refresh(db_strategy)
+    return db_strategy
+
+@app.get("/api/strategies", response_model=List[schemas.BotStrategyResponse])
+def get_strategies(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    """Get all available bot strategies"""
+    strategies = db.query(models.BotStrategy).offset(skip).limit(limit).all()
+    return strategies
+
+@app.get("/api/strategies/{strategy_id}", response_model=schemas.BotStrategyResponse)
+def get_strategy(strategy_id: str, db: Session = Depends(get_db)):
+    """Get a specific bot strategy"""
+    strategy = db.query(models.BotStrategy).filter(models.BotStrategy.id == strategy_id).first()
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    return strategy
+
 @app.post("/api/bots", response_model=schemas.BotResponse)
 def create_bot(bot: schemas.BotCreate, db: Session = Depends(get_db)):
     api_key = generate_api_key()
     
-    db_bot = models.Bot(name=bot.name, api_key=api_key)
+    # If strategy_type is provided, create a strategy for this bot
+    strategy_id = None
+    if bot.strategy_type:
+        db_strategy = models.BotStrategy(
+            name=f"{bot.name}_strategy",
+            strategy_type=bot.strategy_type,
+            config=bot.strategy_config or {}
+        )
+        db.add(db_strategy)
+        db.commit()
+        db.refresh(db_strategy)
+        strategy_id = db_strategy.id
+    
+    db_bot = models.Bot(
+        name=bot.name, 
+        api_key=api_key,
+        strategy_id=strategy_id
+    )
     db.add(db_bot)
     db.commit()
     db.refresh(db_bot)
@@ -156,6 +200,10 @@ def create_bot(bot: schemas.BotCreate, db: Session = Depends(get_db)):
     # Initialize portfolio
     db_portfolio = models.Portfolio(bot_id=db_bot.id, cash_balance=100000.0)
     db.add(db_portfolio)
+    
+    # Initialize KPI tracking
+    db_kpi = models.BotKPI(bot_id=db_bot.id, strategy_id=strategy_id)
+    db.add(db_kpi)
     db.commit()
     
     return db_bot
@@ -339,3 +387,52 @@ def get_bot_pnl(bot_id: str, period: str = "7d", db: Session = Depends(get_db)):
         "total_equity": round(total_equity, 2),
         "history": history,
     }
+
+@app.get("/api/bots/{bot_id}/kpi", response_model=schemas.BotKPIResponse)
+def get_bot_kpi(bot_id: str, db: Session = Depends(get_db)):
+    """Get KPI data for a specific bot"""
+    bot = resolve_bot(db, bot_id)
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot not found")
+    
+    kpi = db.query(models.BotKPI).filter(models.BotKPI.bot_id == bot.id).first()
+    if not kpi:
+        # Create a default KPI record if it doesn't exist
+        kpi = models.BotKPI(bot_id=bot.id, strategy_id=bot.strategy_id)
+        db.add(kpi)
+        db.commit()
+        db.refresh(kpi)
+    
+    return kpi
+
+@app.post("/api/bots/{bot_id}/kpi/update")
+def update_bot_kpi(bot_id: str, kpi_data: dict, db: Session = Depends(get_db)):
+    """Update KPI data for a specific bot"""
+    bot = resolve_bot(db, bot_id)
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot not found")
+    
+    kpi = db.query(models.BotKPI).filter(models.BotKPI.bot_id == bot.id).first()
+    if not kpi:
+        kpi = models.BotKPI(bot_id=bot.id, strategy_id=bot.strategy_id)
+        db.add(kpi)
+        db.commit()
+        db.refresh(kpi)
+    
+    # Update KPI fields from the provided data
+    for field, value in kpi_data.items():
+        if hasattr(kpi, field):
+            setattr(kpi, field, value)
+    
+    db.commit()
+    db.refresh(kpi)
+    return {"status": "updated", "kpi_id": kpi.id}
+
+@app.get("/api/bots/{bot_id}", response_model=schemas.BotWithStrategyResponse)
+def get_bot_details(bot_id: str, db: Session = Depends(get_db)):
+    """Get detailed bot information including strategy"""
+    bot = resolve_bot(db, bot_id)
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot not found")
+    
+    return bot

@@ -33,8 +33,12 @@ from shared.config import (
     ALPHA_SYMBOL,
     ALPHA_TP_PCT,
     STARTING_EQUITY,
+    BOT_ID,
+    API_BASE,
+    KPI_SYNC_INTERVAL,
 )
 from shared.exchange_client import ExchangeClient
+from shared.kpi_syncer import KPISyncWorker
 
 
 class AlphaBot:
@@ -49,6 +53,11 @@ class AlphaBot:
         self.risk = RiskManager(symbol=ALPHA_SYMBOL)
         self.drawdown = DrawdownGuard(STARTING_EQUITY)
         self.kpi = KPITracker()
+        
+        # KPI sync worker
+        self.kpi_syncer = KPISyncWorker(BOT_ID, KPI_SYNC_INTERVAL, API_BASE)
+        self.kpi_syncer.set_tracker(self.kpi, "alpha")
+        
         self.pending_tp_order_id: int | None = None
         self.latest_mid: float = 0.0
         self.latest_bids: list = []
@@ -75,9 +84,11 @@ class AlphaBot:
         )
         hurst_thread.start()
 
+        print(f"[AlphaBot] Starting KPI sync worker for bot {BOT_ID} (interval={KPI_SYNC_INTERVAL}s)")
         await asyncio.gather(
             self.client.run(),
             run_status_server(),
+            self.kpi_syncer.run(),
         )
 
     def _hurst_worker(self):

@@ -5,6 +5,11 @@ EXCHANGE_WS_URL = os.getenv("EXCHANGE_WS_URL", "ws://127.0.0.1:9001")
 BOT_API_KEY = os.getenv("BOT_API_KEY", "sk_live_376821dfe55a83bfa9943a245c45c6c1").strip()
 # Docker: set EXCHANGE_WS_URL=ws://engine:9001
 
+# Bot identity and API
+BOT_ID = os.getenv("BOT_ID", "779e0bc5-ee36-493e-9984-c15169675eb3")  # Default: Alpha-01
+API_BASE = os.getenv("API_BASE", "http://localhost:8000")
+KPI_SYNC_INTERVAL = int(os.getenv("KPI_SYNC_INTERVAL", "30"))  # seconds
+
 # Bot HTTP status servers
 ALPHA_BOT_PORT = int(os.getenv("ALPHA_BOT_PORT", "3001"))
 MM_BOT_PORT = int(os.getenv("MM_BOT_PORT", "3002"))
