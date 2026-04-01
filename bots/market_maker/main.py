@@ -19,7 +19,7 @@ from market_maker.order_tracker import OrderTracker
 from market_maker.spread_calculator import SpreadCalculator
 from market_maker.status_server import run as run_status_server
 from market_maker.status_server import update_status
-from shared.config import MM_REQUOTE_INTERVAL, MM_SYMBOL, PNL_FLOOR, STARTING_EQUITY
+from shared.config import MM_BOT_API_KEY, MM_REQUOTE_INTERVAL, MM_SYMBOL, PNL_FLOOR, STARTING_EQUITY
 from shared.exchange_client import ExchangeClient
 
 
@@ -29,6 +29,7 @@ class MarketMakerBot:
         self.client = ExchangeClient(
             on_message=self._handle_message,
             on_reconnect=self._on_reconnect,
+            api_key=MM_BOT_API_KEY,
         )
         self.inventory = InventoryManager(symbol=MM_SYMBOL)
         self.spread = SpreadCalculator()

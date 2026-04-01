@@ -17,9 +17,11 @@ class ExchangeClient:
         self,
         on_message: Callable[[dict], Awaitable[None]],
         on_reconnect: Callable[[], Awaitable[None]] | None = None,
+        api_key: str | None = None,
     ):
         self.on_message = on_message
         self.on_reconnect = on_reconnect
+        self._api_key = api_key or BOT_API_KEY
         self.user_id: str | None = None
         self._symbol_prices: dict[str, float] = {}
         self._ws = None
@@ -38,7 +40,7 @@ class ExchangeClient:
                     # Immediately send auth message
                     await ws.send(json.dumps({
                         "type": "auth",
-                        "api_key": BOT_API_KEY
+                        "api_key": self._api_key
                     }))
                     
                     self._connected.set()

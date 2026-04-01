@@ -30,7 +30,68 @@ services:
     networks:
       - bull-net
 
-  # ── Module 2: React Frontend (placeholder — uncomment when ready) ──
+  # ── Module 2: Trading Bots ──
+  alpha_bot:
+    build: ./bots
+    container_name: synthetic-bull-alpha
+    depends_on:
+      - engine
+      - admin_api
+    environment:
+      - EXCHANGE_WS_URL=ws://engine:9001
+      - ALPHA_BOT_API_KEY=${ALPHA_BOT_API_KEY:-}
+      - ALPHA_SYMBOL=${ALPHA_SYMBOL:-BTC}
+      - STARTING_EQUITY=${STARTING_EQUITY:-100000.0}
+      - PNL_FLOOR=${PNL_FLOOR:-80000.0}
+      - ALPHA_BOT_PORT=3001
+    ports:
+      - "3001:3001"
+    command: ["python", "-m", "alpha.main"]
+    restart: unless-stopped
+    networks:
+      - bull-net
+
+  market_maker_bot:
+    build: ./bots
+    container_name: synthetic-bull-mm
+    depends_on:
+      - engine
+      - admin_api
+    environment:
+      - EXCHANGE_WS_URL=ws://engine:9001
+      - MM_BOT_API_KEY=${MM_BOT_API_KEY:-}
+      - MM_SYMBOL=${MM_SYMBOL:-AAPL}
+      - STARTING_EQUITY=${STARTING_EQUITY:-100000.0}
+      - PNL_FLOOR=${PNL_FLOOR:-80000.0}
+      - MM_BOT_PORT=3002
+    ports:
+      - "3002:3002"
+    command: ["python", "-m", "market_maker.main"]
+    restart: unless-stopped
+    networks:
+      - bull-net
+
+  custom_bot:
+    build: ./bots
+    container_name: synthetic-bull-custom
+    depends_on:
+      - engine
+      - admin_api
+    environment:
+      - EXCHANGE_WS_URL=ws://engine:9001
+      - CUSTOM_BOT_API_KEY=${CUSTOM_BOT_API_KEY:-}
+      - CUSTOM_SYMBOL=${CUSTOM_SYMBOL:-ETH}
+      - STARTING_EQUITY=${STARTING_EQUITY:-100000.0}
+      - PNL_FLOOR=${PNL_FLOOR:-80000.0}
+      - CUSTOM_BOT_PORT=3003
+    ports:
+      - "3003:3003"
+    command: ["python", "-m", "custom.main"]
+    restart: unless-stopped
+    networks:
+      - bull-net
+
+  # ── Module 3: React Frontend (placeholder — uncomment when ready) ──
   # frontend:
   #   build: ./frontend
   #   container_name: synthetic-bull-frontend

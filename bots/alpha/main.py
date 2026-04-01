@@ -26,6 +26,7 @@ from alpha.status_server import run as run_status_server
 from alpha.status_server import update_status
 from alpha.tick_buffer import TickBuffer
 from shared.config import (
+    ALPHA_BOT_API_KEY,
     ALPHA_HURST_MR,
     ALPHA_HURST_TRENDING,
     ALPHA_HURST_WINDOW,
@@ -43,6 +44,7 @@ class AlphaBot:
         self.client = ExchangeClient(
             on_message=self._handle_message,
             on_reconnect=self._on_reconnect,
+            api_key=ALPHA_BOT_API_KEY,
         )
         self.buffer = TickBuffer()
         self.scorer = RegimeSignalProcessor()

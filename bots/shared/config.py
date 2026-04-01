@@ -2,12 +2,20 @@ import os
 
 # Exchange connection
 EXCHANGE_WS_URL = os.getenv("EXCHANGE_WS_URL", "ws://127.0.0.1:9001")
-BOT_API_KEY = os.getenv("BOT_API_KEY", "")
 # Docker: set EXCHANGE_WS_URL=ws://engine:9001
+
+# Legacy single-key fallback (used if per-bot key is not set)
+BOT_API_KEY = os.getenv("BOT_API_KEY", "")
+
+# Per-bot API keys — each bot authenticates with its own key
+ALPHA_BOT_API_KEY = os.getenv("ALPHA_BOT_API_KEY", "") or BOT_API_KEY
+MM_BOT_API_KEY = os.getenv("MM_BOT_API_KEY", "") or BOT_API_KEY
+CUSTOM_BOT_API_KEY = os.getenv("CUSTOM_BOT_API_KEY", "") or BOT_API_KEY
 
 # Bot HTTP status servers
 ALPHA_BOT_PORT = int(os.getenv("ALPHA_BOT_PORT", "3001"))
 MM_BOT_PORT = int(os.getenv("MM_BOT_PORT", "3002"))
+CUSTOM_BOT_PORT = int(os.getenv("CUSTOM_BOT_PORT", "3003"))
 
 # Capital
 STARTING_EQUITY = float(os.getenv("STARTING_EQUITY", "100000.0"))
@@ -45,7 +53,9 @@ MM_MAX_ORDERS = int(os.getenv("MM_MAX_ORDERS", "10"))
 # Symbol selection
 ALPHA_SYMBOL = os.getenv("ALPHA_SYMBOL", "BTC")
 MM_SYMBOL = os.getenv("MM_SYMBOL", "AAPL")
+CUSTOM_SYMBOL = os.getenv("CUSTOM_SYMBOL", "ETH")
 
 # Minimum order quantity per symbol
 ALPHA_MIN_QTY = float(os.getenv("ALPHA_MIN_QTY", "0.001"))
 MM_MIN_QTY = float(os.getenv("MM_MIN_QTY", "0.001"))
+CUSTOM_MIN_QTY = float(os.getenv("CUSTOM_MIN_QTY", "0.001"))
