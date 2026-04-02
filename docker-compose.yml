@@ -24,8 +24,15 @@ services:
     environment:
       - DB_DIR=/data
       - ENGINE_WS_URL=ws://engine:9001
+      - BOT_WORKING_DIR=/bots
+      - ENABLE_SESSION_ORCHESTRATOR=${ENABLE_SESSION_ORCHESTRATOR:-0}
+      - ENABLE_SCHEDULED_LIVE_SESSIONS=${ENABLE_SCHEDULED_LIVE_SESSIONS:-0}
+      - ENABLE_REPLAY_SESSIONS=${ENABLE_REPLAY_SESSIONS:-0}
+      - SCHEDULER_POLL_SECONDS=${SCHEDULER_POLL_SECONDS:-2}
+      - SCHEDULER_MAX_RETRIES=${SCHEDULER_MAX_RETRIES:-3}
     volumes:
       - ./data:/data
+      - ./bots:/bots
     restart: unless-stopped
     networks:
       - bull-net

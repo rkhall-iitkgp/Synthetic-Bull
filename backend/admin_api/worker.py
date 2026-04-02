@@ -34,8 +34,10 @@ def process_trade_fifo(db: Session, trade: models.Trade):
     conn = next((s for s in active_sessions if s.session_type == "connection"), None)
     if lap:
         trade.session_id = lap.id
+        trade.run_id = lap.run_id
     elif conn:
         trade.session_id = conn.id
+        trade.run_id = conn.run_id
         
     opp_side = "sell" if trade.side == "buy" else "buy"
     
@@ -68,6 +70,7 @@ def process_trade_fifo(db: Session, trade: models.Trade):
         rnd = models.TradeRound(
             bot_id=trade.bot_id,
             session_id=trade.session_id,
+            run_id=trade.run_id,
             symbol=trade.symbol,
             side=side_label,
             entry_price=opp.price,

@@ -1,0 +1,57 @@
+ERROR:    [Errno 98] error while attempting to bind on address ('0.0.0.0', 3001): address already in use
+Task exception was never retrieved
+future: <Task finished name='Task-1' coro=<main() done, defined at /bots/alpha/main.py:462> exception=SystemExit(1)>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/site-packages/uvicorn/server.py", line 172, in startup
+    server = await loop.create_server(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/asyncio/base_events.py", line 1536, in create_server
+    raise OSError(err.errno, msg) from None
+OSError: [Errno 98] error while attempting to bind on address ('0.0.0.0', 3001): address already in use
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/asyncio/runners.py", line 189, in run
+    with Runner(debug=debug) as runner:
+  File "/usr/local/lib/python3.11/asyncio/runners.py", line 63, in __exit__
+    self.close()
+  File "/usr/local/lib/python3.11/asyncio/runners.py", line 71, in close
+    _cancel_all_tasks(loop)
+  File "/usr/local/lib/python3.11/asyncio/runners.py", line 201, in _cancel_all_tasks
+    loop.run_until_complete(tasks.gather(*to_cancel, return_exceptions=True))
+  File "/usr/local/lib/python3.11/asyncio/base_events.py", line 641, in run_until_complete
+    self.run_forever()
+  File "/usr/local/lib/python3.11/asyncio/base_events.py", line 608, in run_forever
+    self._run_once()
+  File "/usr/local/lib/python3.11/asyncio/base_events.py", line 1936, in _run_once
+    handle._run()
+  File "/usr/local/lib/python3.11/asyncio/events.py", line 84, in _run
+    self._context.run(self._callback, *self._args)
+  File "/bots/alpha/main.py", line 464, in main
+    await bot.run()
+  File "/bots/alpha/main.py", line 77, in run
+    await asyncio.gather(
+  File "/usr/local/lib/python3.11/asyncio/runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/asyncio/base_events.py", line 641, in run_until_complete
+    self.run_forever()
+  File "/usr/local/lib/python3.11/asyncio/base_events.py", line 608, in run_forever
+    self._run_once()
+  File "/usr/local/lib/python3.11/asyncio/base_events.py", line 1936, in _run_once
+    handle._run()
+  File "/usr/local/lib/python3.11/asyncio/events.py", line 84, in _run
+    self._context.run(self._callback, *self._args)
+  File "/bots/alpha/status_server.py", line 47, in run
+    await server.serve()
+  File "/usr/local/lib/python3.11/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/usr/local/lib/python3.11/site-packages/uvicorn/server.py", line 94, in _serve
+    await self.startup(sockets=sockets)
+  File "/usr/local/lib/python3.11/site-packages/uvicorn/server.py", line 182, in startup
+    sys.exit(1)
+SystemExit: 1
