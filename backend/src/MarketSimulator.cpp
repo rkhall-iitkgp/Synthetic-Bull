@@ -49,7 +49,6 @@ void MarketSimulator::run() {
 
 void MarketSimulator::stepPrice() {
     double S = price_.load();
-    double v = variance_;
 
     // ── Correlated Brownian motions ──
     double Z1_idio = normal_(rng_);
@@ -57,36 +56,76 @@ void MarketSimulator::stepPrice() {
 
     // Mix market factor with idiosyncratic noise
     double Z1 = beta_ * Z_market + std::sqrt(1.0 - beta_ * beta_) * Z1_idio;
+    
+    double log_return = 0.0;
 
-    // Z2 correlated with Z1 via rho
-    double Z2 = rho_ * Z1 + std::sqrt(1.0 - rho_ * rho_) * normal_(rng_);
+    if (model_type_ == SimModelType::OFI_GBM) {
+        // ── OFI-Augmented GBM price step ──
+        OrderBookSnapshot snap = engine_.getSnapshot(1);
+        double vb_curr = 0.0, pb_curr = 0.0;
+        double va_curr = 0.0, pa_curr = 0.0;
+        
+        if (!snap.bids.empty()) {
+            pb_curr = snap.bids[0].price;
+            vb_curr = snap.bids[0].total_qty;
+        }
+        if (!snap.asks.empty()) {
+            pa_curr = snap.asks[0].price;
+            va_curr = snap.asks[0].total_qty;
+        }
+        
+        double eb = (pb_curr >= prev_bid_price_) ? (vb_curr - prev_bid_qty_) : -prev_bid_qty_;
+        double ea = (pa_curr <= prev_ask_price_) ? (va_curr - prev_ask_qty_) : prev_ask_qty_;
+        
+        double OFI = eb - ea;
+        double D = vb_curr + va_curr;
+        double I = (D > 1e-8) ? (OFI / D) : 0.0;
+        
+        double v = sigma_ * sigma_;
+        double drift = (mu_ - 0.5 * v) * dt_;
+        double diffusion = std::sqrt(v) * std::sqrt(dt_) * Z1;
+        
+        log_return = drift + diffusion + gamma_ * I * dt_;
+        
+        prev_bid_price_ = pb_curr;
+        prev_ask_price_ = pa_curr;
+        prev_bid_qty_   = vb_curr;
+        prev_ask_qty_   = va_curr;
+        
+    } else {
+        // ── Heston + Jump Diffusion price step ──
+        double v = variance_;
 
-    // ── Heston variance step ──
-    double sqrt_v  = std::sqrt(std::max(v, 1e-6));
-    double sqrt_dt = std::sqrt(dt_);
+        // Z2 correlated with Z1 via rho
+        double Z2 = rho_ * Z1 + std::sqrt(1.0 - rho_ * rho_) * normal_(rng_);
 
-    double v_new = v + kappa_ * (theta_ - v) * dt_
-                     + xi_ * sqrt_v * sqrt_dt * Z2;
-    // Reflection scheme: use abs to prevent negative variance, floor at 1e-6
-    v_new = std::max(std::abs(v_new), 1e-6);
-    variance_ = v_new;
+        // ── Heston variance step ──
+        double sqrt_v  = std::sqrt(std::max(v, 1e-6));
+        double sqrt_dt = std::sqrt(dt_);
 
-    // ── Jump compensation (prevents long-term drift from jumps) ──
-    double jump_comp = 0.0;
-    if (jump_intensity_ > 0.0) {
-        jump_comp = jump_intensity_ * (std::exp(jump_mean_ + 0.5 * jump_std_ * jump_std_) - 1.0);
-    }
+        double v_new = v + kappa_ * (theta_ - v) * dt_
+                         + xi_ * sqrt_v * sqrt_dt * Z2;
+        // Reflection scheme: use abs to prevent negative variance, floor at 1e-6
+        v_new = std::max(std::abs(v_new), 1e-6);
+        variance_ = v_new;
 
-    // ── Heston price step (GBM with stochastic vol) ──
-    double drift     = (mu_ - jump_comp - 0.5 * v) * dt_;
-    double diffusion = sqrt_v * sqrt_dt * Z1;
+        // ── Jump compensation (prevents long-term drift from jumps) ──
+        double jump_comp = 0.0;
+        if (jump_intensity_ > 0.0) {
+            jump_comp = jump_intensity_ * (std::exp(jump_mean_ + 0.5 * jump_std_ * jump_std_) - 1.0);
+        }
 
-    double log_return = drift + diffusion;
+        // ── Heston price step (GBM with stochastic vol) ──
+        double drift     = (mu_ - jump_comp - 0.5 * v) * dt_;
+        double diffusion = sqrt_v * sqrt_dt * Z1;
 
-    // ── Merton jump (Poisson sampling) ──
-    if (jump_intensity_ > 0.0 && uniform_(rng_) < jump_intensity_ * dt_) {
-        double J = jump_mean_ + jump_std_ * normal_(rng_);
-        log_return += J;  // additive in log-space = multiplicative in price
+        log_return = drift + diffusion;
+
+        // ── Merton jump (Poisson sampling) ──
+        if (jump_intensity_ > 0.0 && uniform_(rng_) < jump_intensity_ * dt_) {
+            double J = jump_mean_ + jump_std_ * normal_(rng_);
+            log_return += J;  // additive in log-space = multiplicative in price
+        }
     }
 
     // ── Circuit breaker: cap single-tick move ──

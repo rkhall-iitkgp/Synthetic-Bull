@@ -98,6 +98,10 @@ inline void Exchange::addSymbol(const SymbolConfig& cfg,
     state.simulator->setTickMs(20);
     state.simulator->setMaxBotOrders(300);
 
+    // Simulation Model Toggle & OFI
+    state.simulator->setModelType(cfg.model_type);
+    state.simulator->setGamma(cfg.gamma);
+
     // Heston stochastic volatility
     state.simulator->setKappa(cfg.kappa);
     state.simulator->setTheta(cfg.theta);

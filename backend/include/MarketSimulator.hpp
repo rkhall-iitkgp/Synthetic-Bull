@@ -24,6 +24,10 @@ public:
     void setInitialPrice(double v) { price_.store(v); }
     void setSymbol(const std::string& s) { symbol_ = s; }
 
+    // ── Simulation Model Toggle ──
+    void setModelType(SimModelType type) { model_type_ = type; }
+    void setGamma(double v)        { gamma_ = v; }
+
     // ── Heston stochastic volatility ──
     void setKappa(double v)  { kappa_ = v; }
     void setTheta(double v)  { theta_ = v; }
@@ -76,6 +80,14 @@ private:
     int    levels_      = 5;
     int    tick_ms_     = 20;
     int    max_bot_orders_ = 300;
+
+    // ── Simulation Model Toggle & OFI Variables ──
+    SimModelType model_type_ = SimModelType::HESTON_JUMP;
+    double gamma_            = 0.2;
+    double prev_bid_price_   = 0.0;
+    double prev_ask_price_   = 0.0;
+    double prev_bid_qty_     = 0.0;
+    double prev_ask_qty_     = 0.0;
 
     // ── Heston stochastic volatility ──
     double variance_    = 0.0004;  // v_t (instantaneous variance, init = sigma²)

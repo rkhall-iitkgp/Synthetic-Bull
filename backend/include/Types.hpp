@@ -13,6 +13,7 @@ namespace sb {
 
 enum class Side { BUY, SELL };
 enum class OrderType { LIMIT, MARKET };
+enum class SimModelType { HESTON_JUMP, OFI_GBM };
 
 // ─── Symbol configuration ────────────────────────────────────────────────────
 
@@ -47,6 +48,12 @@ struct SymbolConfig {
     // ── Asset correlation ──
     double      beta           = 0.0;    // loading on shared sector factor (0 = uncorrelated)
     std::string sector         = "tech"; // sector group: "tech", "financial", "crypto"
+
+    // ── Simulation Model Toggle ──
+    SimModelType model_type = SimModelType::OFI_GBM;
+
+    // ── OFI-Augmented GBM Model ──
+    double      gamma         = 0.2;     // OFI price impact strength
 };
 
 // ─── Order ───────────────────────────────────────────────────────────────────
