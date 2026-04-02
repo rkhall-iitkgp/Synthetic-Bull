@@ -35,7 +35,7 @@ class ExchangeClient:
         while True:
             try:
                 if not BOT_API_KEY and not self._warned_missing_key:
-                    print("[ExchangeClient] WARNING: BOT_API_KEY is empty. Server will keep this client as sim_bot.")
+                    print("[ExchangeClient] WARNING: BOT_API_KEY is empty. Server will reject auth and close this connection.")
                     self._warned_missing_key = True
 
                 async with websockets.connect(EXCHANGE_WS_URL) as ws:

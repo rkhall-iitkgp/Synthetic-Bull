@@ -164,12 +164,17 @@ void MarketSimulator::injectOrders() {
             bid.price    = mid * (1.0 - bid_offset);
             bid.quantity = bid_qty;
             bid.is_bot   = true;
-            int fills = engine_.processOrder(bid);
-            bot_order_ids_.push_back(bid.id);
+            double submitted_qty = bid.quantity;
+            engine_.processOrder(bid);
 
-            // Update inventory if filled (atomic, outside engine mutex)
-            if (fills > 0) {
-                inventory_.store(inventory_.load() + bid_qty);
+            if (bid.quantity > 1e-12) {
+                bot_order_ids_.push_back(bid.id);
+            }
+
+            // Update inventory using actual executed quantity.
+            double filled_qty = submitted_qty - bid.quantity;
+            if (filled_qty > 1e-12) {
+                inventory_.store(inventory_.load() + filled_qty);
             }
         }
 
@@ -183,12 +188,17 @@ void MarketSimulator::injectOrders() {
             ask.price    = mid * (1.0 + ask_offset);
             ask.quantity = ask_qty;
             ask.is_bot   = true;
-            int fills = engine_.processOrder(ask);
-            bot_order_ids_.push_back(ask.id);
+            double submitted_qty = ask.quantity;
+            engine_.processOrder(ask);
 
-            // Update inventory if filled (atomic, outside engine mutex)
-            if (fills > 0) {
-                inventory_.store(inventory_.load() - ask_qty);
+            if (ask.quantity > 1e-12) {
+                bot_order_ids_.push_back(ask.id);
+            }
+
+            // Update inventory using actual executed quantity.
+            double filled_qty = submitted_qty - ask.quantity;
+            if (filled_qty > 1e-12) {
+                inventory_.store(inventory_.load() - filled_qty);
             }
         }
     }

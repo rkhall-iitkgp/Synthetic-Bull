@@ -18,6 +18,8 @@
 #include <atomic>
 #include <cmath>
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 
 using json = nlohmann::json;
 
@@ -130,6 +132,7 @@ static sb::Exchange g_exchange;
 static std::unordered_map<std::string, std::string> g_valid_keys; // api_key -> bot_id
 static std::mutex g_auth_mutex;
 static std::string g_master_admin_key = "sk_admin_12345"; // For the data logger / firehose
+static const std::string g_frontend_default_user = "frontend_user";
 
 // Portfolio per user_id (cash is shared, positions are per-symbol)
 static std::unordered_map<std::string, sb::Portfolio> g_portfolios;
@@ -158,6 +161,132 @@ static uWS::Loop* g_loop = nullptr;
 
 // Global app pointer for deferred publishes
 static uWS::App* g_app = nullptr;
+
+struct ShortSellingConfig {
+    bool   enabled = true;
+    double max_short_qty_per_symbol = 500.0;
+    double max_total_short_notional = 250000.0;
+    double min_equity = 1000.0;
+    double max_short_notional_to_equity = 2.0;
+};
+
+static bool parseEnvBool(const char* name, bool default_value) {
+    const char* raw = std::getenv(name);
+    if (!raw) return default_value;
+
+    std::string v(raw);
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    if (v == "1" || v == "true" || v == "yes" || v == "on") return true;
+    if (v == "0" || v == "false" || v == "no" || v == "off") return false;
+    return default_value;
+}
+
+static double parseEnvDouble(const char* name,
+                             double default_value,
+                             double min_value = 0.0) {
+    const char* raw = std::getenv(name);
+    if (!raw) return default_value;
+
+    char* end = nullptr;
+    double parsed = std::strtod(raw, &end);
+    if (end == raw || !std::isfinite(parsed) || parsed < min_value) {
+        return default_value;
+    }
+    return parsed;
+}
+
+static ShortSellingConfig loadShortSellingConfig() {
+    ShortSellingConfig cfg;
+    cfg.enabled = parseEnvBool("ALLOW_SHORT_SELLING", true);
+    cfg.max_short_qty_per_symbol = parseEnvDouble("MAX_SHORT_QTY_PER_SYMBOL", 500.0, 0.0);
+    cfg.max_total_short_notional = parseEnvDouble("MAX_TOTAL_SHORT_NOTIONAL", 250000.0, 0.0);
+    cfg.min_equity = parseEnvDouble("MIN_SHORT_EQUITY", 1000.0, 0.0);
+    cfg.max_short_notional_to_equity = parseEnvDouble("MAX_SHORT_NOTIONAL_TO_EQUITY", 2.0, 0.0);
+    return cfg;
+}
+
+static const ShortSellingConfig g_short_cfg = loadShortSellingConfig();
+
+static double safeMarkPrice(const std::string& symbol, double fallback = 0.0) {
+    auto* state = g_exchange.get(symbol);
+    if (state && state->simulator) {
+        double p = state->simulator->currentPrice();
+        if (std::isfinite(p) && p > 1e-8) {
+            return p;
+        }
+    }
+    return fallback;
+}
+
+static double holdingsForSymbol(const sb::Portfolio& pf, const std::string& symbol) {
+    auto it = pf.positions.find(symbol);
+    return (it != pf.positions.end()) ? it->second.holdings : 0.0;
+}
+
+static std::unordered_map<std::string, double>
+reservedSellQtyBySymbol(const std::string& uid) {
+    std::unordered_map<std::string, double> out;
+    std::lock_guard<std::mutex> lock(g_open_orders_mutex);
+    auto it = g_open_orders.find(uid);
+    if (it == g_open_orders.end()) return out;
+
+    for (const auto& oo : it->second) {
+        if (oo.side == "sell" && oo.remaining_qty > 1e-12) {
+            out[oo.symbol] += oo.remaining_qty;
+        }
+    }
+    return out;
+}
+
+static double computePortfolioEquity(const sb::Portfolio& pf) {
+    double holdings_value = 0.0;
+    for (const auto& [sym, pos] : pf.positions) {
+        double fallback = (std::abs(pos.avg_cost) > 1e-8) ? pos.avg_cost : 0.0;
+        double mark = safeMarkPrice(sym, fallback);
+        holdings_value += pos.holdings * mark;
+    }
+    return pf.cash + holdings_value;
+}
+
+static double computeProjectedShortNotional(
+    const sb::Portfolio& pf,
+    const std::unordered_map<std::string, double>& reserved_sells,
+    const std::string& extra_sell_symbol = "",
+    double extra_sell_qty = 0.0) {
+
+    std::unordered_map<std::string, double> effective_holdings;
+    effective_holdings.reserve(pf.positions.size() + reserved_sells.size() + 1);
+
+    for (const auto& [sym, pos] : pf.positions) {
+        effective_holdings[sym] = pos.holdings;
+    }
+
+    for (const auto& [sym, qty] : reserved_sells) {
+        effective_holdings[sym] -= qty;
+    }
+
+    if (!extra_sell_symbol.empty() && extra_sell_qty > 1e-12) {
+        effective_holdings[extra_sell_symbol] -= extra_sell_qty;
+    }
+
+    double total_short_notional = 0.0;
+    for (const auto& [sym, eff_holdings] : effective_holdings) {
+        if (eff_holdings >= -1e-12) continue;
+
+        double fallback = 0.0;
+        auto it = pf.positions.find(sym);
+        if (it != pf.positions.end() && std::abs(it->second.avg_cost) > 1e-8) {
+            fallback = it->second.avg_cost;
+        }
+        double mark = safeMarkPrice(sym, fallback);
+        if (mark <= 1e-8) continue;
+
+        total_short_notional += (-eff_holdings) * mark;
+    }
+    return total_short_notional;
+}
 
 static void loadAuthKeysFromDB() {
     sqlite3* db;
@@ -351,6 +480,8 @@ static json tradeToJson(const sb::Trade& t) {
         {"qty",    std::round(t.quantity * 100000.0) / 100000.0},
         {"buyer",  t.buyer_id},
         {"seller", t.seller_id},
+        {"buy_order_id",  t.buy_order_id},
+        {"sell_order_id", t.sell_order_id},
         {"ts",     t.timestamp}
     };
 }
@@ -391,42 +522,28 @@ static void onTrade(const std::string& symbol, const sb::Trade& trade) {
     // 2. Reduce filled orders from open_orders tracking
     {
         std::lock_guard<std::mutex> lock(g_open_orders_mutex);
-        // Reduce from buyer's open orders
-        auto bit = g_open_orders.find(trade.buyer_id);
-        if (bit != g_open_orders.end()) {
-            auto& vec = bit->second;
-            for (auto it = vec.begin(); it != vec.end();) {
-                if (it->symbol == symbol && it->side == "buy" && std::abs(it->price - trade.price) < 0.005) {
-                    it->remaining_qty -= trade.quantity;
+        auto reduceByOrderId = [&](const std::string& user_id,
+                                   const std::string& side,
+                                   uint64_t order_id,
+                                   double fill_qty) {
+            if (order_id == 0) return;
+            auto it_map = g_open_orders.find(user_id);
+            if (it_map == g_open_orders.end()) return;
+
+            auto& vec = it_map->second;
+            for (auto it = vec.begin(); it != vec.end(); ++it) {
+                if (it->order_id == order_id && it->symbol == symbol && it->side == side) {
+                    it->remaining_qty -= fill_qty;
                     if (it->remaining_qty <= 1e-8) {
-                        it = vec.erase(it);
-                    } else {
-                        ++it;
+                        vec.erase(it);
                     }
                     break;
-                } else {
-                    ++it;
                 }
             }
-        }
-        // Reduce from seller's open orders
-        auto sit = g_open_orders.find(trade.seller_id);
-        if (sit != g_open_orders.end()) {
-            auto& vec = sit->second;
-            for (auto it = vec.begin(); it != vec.end();) {
-                if (it->symbol == symbol && it->side == "sell" && std::abs(it->price - trade.price) < 0.005) {
-                    it->remaining_qty -= trade.quantity;
-                    if (it->remaining_qty <= 1e-8) {
-                        it = vec.erase(it);
-                    } else {
-                        ++it;
-                    }
-                    break;
-                } else {
-                    ++it;
-                }
-            }
-        }
+        };
+
+        reduceByOrderId(trade.buyer_id, "buy", trade.buy_order_id, trade.quantity);
+        reduceByOrderId(trade.seller_id, "sell", trade.sell_order_id, trade.quantity);
     }
 
     // 3. Feed candle aggregator for this symbol
@@ -560,10 +677,18 @@ int main() {
     }
     std::cout << "\n";
 
-    // Create the sim_bot portfolio so trade callbacks don't crash
+    std::cout << "[~] Short selling: " << (g_short_cfg.enabled ? "ENABLED" : "DISABLED")
+              << "  max_symbol_qty=" << g_short_cfg.max_short_qty_per_symbol
+              << "  max_total_notional=" << g_short_cfg.max_total_short_notional
+              << "  min_equity=" << g_short_cfg.min_equity
+              << "  notional_to_equity=" << g_short_cfg.max_short_notional_to_equity
+              << "\n";
+
+    // Create internal and default frontend portfolios so trade callbacks/UI are safe.
     {
         std::lock_guard<std::mutex> lock(g_portfolio_mutex);
         g_portfolios["sim_bot"] = sb::Portfolio{};
+        g_portfolios[g_frontend_default_user] = sb::Portfolio{};
     }
 
     // ── uWebSockets app ──
@@ -580,54 +705,13 @@ int main() {
         // ── on open ──
         .open = [](auto* ws) {
             auto* data = ws->getUserData();
-            // Default to sim_bot, frontend works seamlessly. Real bots will authenticate and override this.
-            data->user_id = "sim_bot";
-            data->is_authenticated = true;
+            // Sockets start unauthenticated. Frontend can claim guest identity via guest_login.
+            data->user_id.clear();
+            data->is_authenticated = false;
             data->is_admin = false;
-            
-            // Auto-subscribe the default sim_bot to the market stream
+
+            // Everyone can receive market data; trading still requires auth or guest_login.
             ws->subscribe("market");
-
-            {
-                std::lock_guard<std::mutex> lock(g_portfolio_mutex);
-                if (g_portfolios.find("sim_bot") == g_portfolios.end()) {
-                    g_portfolios["sim_bot"] = sb::Portfolio{};
-                }
-            }
-
-            // Bootstrap dashboard immediately so refresh reuses the same in-memory user state.
-            json symbols_json = json::array();
-            g_exchange.forEachSymbol([&](const std::string& sym, sb::SymbolState& state) {
-                symbols_json.push_back({
-                    {"symbol", sym},
-                    {"price",  std::round(state.simulator->currentPrice() * 100.0) / 100.0}
-                });
-            });
-
-            json welcome = {
-                {"type", "welcome"},
-                {"user_id", "sim_bot"},
-                {"symbols", symbols_json}
-            };
-            ws->send(welcome.dump(), uWS::OpCode::TEXT);
-
-            g_exchange.forEachSymbol([&](const std::string& sym, sb::SymbolState& state) {
-                auto snap = state.engine->getSnapshot(20);
-                ws->send(obSnapshotToJson(sym, snap).dump(), uWS::OpCode::TEXT);
-                auto candles = state.candles->getHistory(200);
-                for (auto& c : candles) {
-                    ws->send(candleToJson(sym, c).dump(), uWS::OpCode::TEXT);
-                }
-            });
-
-            {
-                std::lock_guard<std::mutex> lock(g_portfolio_mutex);
-                auto it = g_portfolios.find("sim_bot");
-                if (it != g_portfolios.end()) {
-                    ws->send(portfolioToJson(it->second).dump(), uWS::OpCode::TEXT);
-                }
-            }
-            ws->send(openOrdersToJson("sim_bot").dump(), uWS::OpCode::TEXT);
         },
 
         // ── on message ──
@@ -663,6 +747,54 @@ int main() {
                 return;
             }
 
+            // Frontend no-key path: claim dedicated guest identity.
+            if (msg_type == "guest_login") {
+                data->user_id = g_frontend_default_user;
+                data->is_authenticated = true;
+                data->is_admin = false;
+
+                {
+                    std::lock_guard<std::mutex> lock(g_portfolio_mutex);
+                    if (g_portfolios.find(g_frontend_default_user) == g_portfolios.end()) {
+                        g_portfolios[g_frontend_default_user] = sb::Portfolio{};
+                    }
+                }
+
+                json symbols_json = json::array();
+                g_exchange.forEachSymbol([&](const std::string& sym, sb::SymbolState& state) {
+                    symbols_json.push_back({
+                        {"symbol", sym},
+                        {"price",  std::round(state.simulator->currentPrice() * 100.0) / 100.0}
+                    });
+                });
+
+                json welcome = {
+                    {"type", "welcome"},
+                    {"user_id", g_frontend_default_user},
+                    {"symbols", symbols_json}
+                };
+                ws->send(welcome.dump(), uWS::OpCode::TEXT);
+
+                g_exchange.forEachSymbol([&](const std::string& sym, sb::SymbolState& state) {
+                    auto snap = state.engine->getSnapshot(20);
+                    ws->send(obSnapshotToJson(sym, snap).dump(), uWS::OpCode::TEXT);
+                    auto candles = state.candles->getHistory(200);
+                    for (auto& c : candles) {
+                        ws->send(candleToJson(sym, c).dump(), uWS::OpCode::TEXT);
+                    }
+                });
+
+                {
+                    std::lock_guard<std::mutex> lock(g_portfolio_mutex);
+                    auto it = g_portfolios.find(g_frontend_default_user);
+                    if (it != g_portfolios.end()) {
+                        ws->send(portfolioToJson(it->second).dump(), uWS::OpCode::TEXT);
+                    }
+                }
+                ws->send(openOrdersToJson(g_frontend_default_user).dump(), uWS::OpCode::TEXT);
+                return;
+            }
+
             if (msg_type == "auth") {
                 std::string api_key = req.value("api_key", "");
                 std::string bot_id = "";
@@ -680,7 +812,11 @@ int main() {
                 }
 
                 if (bot_id.empty()) {
+                    data->is_authenticated = false;
+                    data->is_admin = false;
+                    data->user_id.clear();
                     ws->send(json({{"type", "error"}, {"message", "Invalid API key"}}).dump(), uWS::OpCode::TEXT);
+                    ws->close();
                     return;
                 }
 
@@ -801,14 +937,43 @@ int main() {
                     return;
                 }
 
-                // Capital check (for buy orders)
-                if (side == sb::Side::BUY) {
-                    double order_cost = (ot == sb::OrderType::LIMIT)
-                                            ? price * orig_qty
-                                            : state->simulator->currentPrice() * orig_qty * 1.01;
+                // Snapshot portfolio and open-order reservation state for risk checks.
+                sb::Portfolio portfolio_snapshot;
+                {
                     std::lock_guard<std::mutex> lock(g_portfolio_mutex);
                     auto it = g_portfolios.find(uid);
-                    if (it != g_portfolios.end() && it->second.cash < order_cost) {
+                    if (it == g_portfolios.end()) {
+                        g_portfolios[uid] = sb::Portfolio{};
+                        portfolio_snapshot = g_portfolios[uid];
+                    } else {
+                        portfolio_snapshot = it->second;
+                    }
+                }
+
+                auto reserved_sell_by_symbol = reservedSellQtyBySymbol(uid);
+                double reserved_sell_qty = 0.0;
+                auto rs_it = reserved_sell_by_symbol.find(symbol);
+                if (rs_it != reserved_sell_by_symbol.end()) {
+                    reserved_sell_qty = rs_it->second;
+                }
+
+                double current_holdings = holdingsForSymbol(portfolio_snapshot, symbol);
+                double reference_price = (ot == sb::OrderType::LIMIT)
+                                            ? price
+                                            : safeMarkPrice(symbol, state->simulator->currentPrice());
+                reference_price = std::max(reference_price, 0.01);
+
+                // Capital check (for buy orders). Covering an existing short does not require
+                // additional long capital in this simulation.
+                if (side == sb::Side::BUY) {
+                    double current_short_qty = std::max(0.0, -current_holdings);
+                    double net_new_long_qty = std::max(0.0, orig_qty - current_short_qty);
+                    double order_cost = reference_price * net_new_long_qty;
+                    if (ot == sb::OrderType::MARKET) {
+                        order_cost *= 1.01;
+                    }
+
+                    if (portfolio_snapshot.cash + 1e-12 < order_cost) {
                         ws->send(json({{"type", "error"},
                                        {"message", "Insufficient cash"}}).dump(),
                                  uWS::OpCode::TEXT);
@@ -816,40 +981,56 @@ int main() {
                     }
                 }
 
-                // Holdings check (for sell orders)
+                // Sell side check. If shorting is enabled, apply explicit short risk limits.
                 if (side == sb::Side::SELL) {
-                    double current_holdings = 0.0;
-                    {
-                        std::lock_guard<std::mutex> lock(g_portfolio_mutex);
-                        auto it = g_portfolios.find(uid);
-                        if (it != g_portfolios.end()) {
-                            auto pit = it->second.positions.find(symbol);
-                            if (pit != it->second.positions.end()) {
-                                current_holdings = pit->second.holdings;
-                            }
+                    if (!g_short_cfg.enabled) {
+                        double available = current_holdings - reserved_sell_qty;
+                        if (available < orig_qty - 1e-12) {
+                            ws->send(json({{"type", "error"},
+                                           {"message", "Insufficient holdings"}}).dump(),
+                                     uWS::OpCode::TEXT);
+                            return;
                         }
-                    }
+                    } else {
+                        double projected_effective_holdings =
+                            current_holdings - reserved_sell_qty - orig_qty;
+                        double projected_short_qty = std::max(0.0, -projected_effective_holdings);
 
-                    // Subtract qty already reserved by open sell orders for the same symbol
-                    double reserved_qty = 0.0;
-                    {
-                        std::lock_guard<std::mutex> lock(g_open_orders_mutex);
-                        auto oit = g_open_orders.find(uid);
-                        if (oit != g_open_orders.end()) {
-                            for (const auto& oo : oit->second) {
-                                if (oo.symbol == symbol && oo.side == "sell") {
-                                    reserved_qty += oo.remaining_qty;
-                                }
-                            }
+                        if (projected_short_qty > g_short_cfg.max_short_qty_per_symbol + 1e-12) {
+                            ws->send(json({{"type", "error"},
+                                           {"message", "Short quantity limit exceeded for symbol"}}).dump(),
+                                     uWS::OpCode::TEXT);
+                            return;
                         }
-                    }
 
-                    double available = current_holdings - reserved_qty;
-                    if (available < orig_qty - 1e-12) {
-                        ws->send(json({{"type", "error"},
-                                       {"message", "Insufficient holdings"}}).dump(),
-                                 uWS::OpCode::TEXT);
-                        return;
+                        double equity = computePortfolioEquity(portfolio_snapshot);
+                        if (equity + 1e-12 < g_short_cfg.min_equity) {
+                            ws->send(json({{"type", "error"},
+                                           {"message", "Insufficient equity for short selling"}}).dump(),
+                                     uWS::OpCode::TEXT);
+                            return;
+                        }
+
+                        double projected_short_notional = computeProjectedShortNotional(
+                            portfolio_snapshot,
+                            reserved_sell_by_symbol,
+                            symbol,
+                            orig_qty);
+
+                        if (projected_short_notional > g_short_cfg.max_total_short_notional + 1e-12) {
+                            ws->send(json({{"type", "error"},
+                                           {"message", "Total short notional limit exceeded"}}).dump(),
+                                     uWS::OpCode::TEXT);
+                            return;
+                        }
+
+                        double max_short_by_equity = equity * g_short_cfg.max_short_notional_to_equity;
+                        if (projected_short_notional > max_short_by_equity + 1e-12) {
+                            ws->send(json({{"type", "error"},
+                                           {"message", "Short leverage limit exceeded"}}).dump(),
+                                     uWS::OpCode::TEXT);
+                            return;
+                        }
                     }
                 }
 
