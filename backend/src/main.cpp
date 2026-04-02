@@ -209,6 +209,16 @@ static ShortSellingConfig loadShortSellingConfig() {
 
 static const ShortSellingConfig g_short_cfg = loadShortSellingConfig();
 
+static json shortSellingConfigToJson() {
+    return {
+        {"enabled", g_short_cfg.enabled},
+        {"max_short_qty_per_symbol", g_short_cfg.max_short_qty_per_symbol},
+        {"max_total_short_notional", g_short_cfg.max_total_short_notional},
+        {"min_equity", g_short_cfg.min_equity},
+        {"max_short_notional_to_equity", g_short_cfg.max_short_notional_to_equity}
+    };
+}
+
 static double safeMarkPrice(const std::string& symbol, double fallback = 0.0) {
     auto* state = g_exchange.get(symbol);
     if (state && state->simulator) {
@@ -238,6 +248,39 @@ reservedSellQtyBySymbol(const std::string& uid) {
         }
     }
     return out;
+}
+
+static double reservedBuyNotional(const std::string& uid) {
+    double total = 0.0;
+    std::lock_guard<std::mutex> lock(g_open_orders_mutex);
+    auto it = g_open_orders.find(uid);
+    if (it == g_open_orders.end()) return total;
+
+    for (const auto& oo : it->second) {
+        if (oo.side == "buy" && oo.remaining_qty > 1e-12) {
+            total += oo.remaining_qty * std::max(oo.price, 0.0);
+        }
+    }
+    return total;
+}
+
+static bool estimateMarketBuyCost(const sb::OrderBookSnapshot& snap,
+                                  double qty,
+                                  double& out_cost) {
+    out_cost = 0.0;
+    if (qty <= 1e-12) return true;
+
+    double remaining = qty;
+    for (const auto& lvl : snap.asks) {
+        if (remaining <= 1e-12) break;
+        if (lvl.total_qty <= 1e-12 || lvl.price <= 1e-12) continue;
+
+        double take = std::min(remaining, lvl.total_qty);
+        out_cost += take * lvl.price;
+        remaining -= take;
+    }
+
+    return remaining <= 1e-12;
 }
 
 static double computePortfolioEquity(const sb::Portfolio& pf) {
@@ -579,6 +622,7 @@ static void broadcasterThread() {
 
         // 1. Order book snapshots for ALL symbols
         std::vector<std::string> ob_msgs;
+        ob_msgs.reserve(g_exchange.symbolCount());
         g_exchange.forEachSymbol([&](const std::string& sym, sb::SymbolState& state) {
             auto snap = state.engine->getSnapshot(20);
             ob_msgs.push_back(obSnapshotToJson(sym, snap).dump());
@@ -595,6 +639,7 @@ static void broadcasterThread() {
         }
 
         std::vector<std::string> trade_msgs;
+        trade_msgs.reserve(trades.size());
         for (auto& t : trades) {
             trade_msgs.push_back(tradeToJson(t).dump());
         }
@@ -751,7 +796,8 @@ int main() {
             if (msg_type == "guest_login") {
                 data->user_id = g_frontend_default_user;
                 data->is_authenticated = true;
-                data->is_admin = false;
+                // Single frontend guest acts as admin in this deployment model.
+                data->is_admin = true;
 
                 {
                     std::lock_guard<std::mutex> lock(g_portfolio_mutex);
@@ -771,7 +817,8 @@ int main() {
                 json welcome = {
                     {"type", "welcome"},
                     {"user_id", g_frontend_default_user},
-                    {"symbols", symbols_json}
+                    {"symbols", symbols_json},
+                    {"short_selling", shortSellingConfigToJson()}
                 };
                 ws->send(welcome.dump(), uWS::OpCode::TEXT);
 
@@ -856,7 +903,8 @@ int main() {
                 json welcome = {
                     {"type", "welcome"},
                     {"user_id", bot_id},
-                    {"symbols", symbols_json}
+                    {"symbols", symbols_json},
+                    {"short_selling", shortSellingConfigToJson()}
                 };
                 ws->send(welcome.dump(), uWS::OpCode::TEXT);
 
@@ -951,6 +999,7 @@ int main() {
                 }
 
                 auto reserved_sell_by_symbol = reservedSellQtyBySymbol(uid);
+                double reserved_buy_notional = reservedBuyNotional(uid);
                 double reserved_sell_qty = 0.0;
                 auto rs_it = reserved_sell_by_symbol.find(symbol);
                 if (rs_it != reserved_sell_by_symbol.end()) {
@@ -966,16 +1015,26 @@ int main() {
                 // Capital check (for buy orders). Covering an existing short does not require
                 // additional long capital in this simulation.
                 if (side == sb::Side::BUY) {
-                    double current_short_qty = std::max(0.0, -current_holdings);
-                    double net_new_long_qty = std::max(0.0, orig_qty - current_short_qty);
-                    double order_cost = reference_price * net_new_long_qty;
+                    double order_cost = 0.0;
+
                     if (ot == sb::OrderType::MARKET) {
-                        order_cost *= 1.01;
+                        auto snap = state->engine->getSnapshot(200);
+                        if (!estimateMarketBuyCost(snap, orig_qty, order_cost)) {
+                            ws->send(json({{"type", "error"},
+                                           {"message", "Insufficient ask liquidity for market buy"}}).dump(),
+                                     uWS::OpCode::TEXT);
+                            return;
+                        }
+                    } else {
+                        double current_short_qty = std::max(0.0, -current_holdings);
+                        double net_new_long_qty = std::max(0.0, orig_qty - current_short_qty);
+                        order_cost = reference_price * net_new_long_qty;
                     }
 
-                    if (portfolio_snapshot.cash + 1e-12 < order_cost) {
+                    double required_cash = reserved_buy_notional + order_cost;
+                    if (portfolio_snapshot.cash + 1e-12 < required_cash) {
                         ws->send(json({{"type", "error"},
-                                       {"message", "Insufficient cash"}}).dump(),
+                                       {"message", "Insufficient cash after buy-order reservations"}}).dump(),
                                  uWS::OpCode::TEXT);
                         return;
                     }
@@ -1093,6 +1152,34 @@ int main() {
                     return;
                 }
 
+                // Non-admin users can only cancel their own tracked open orders.
+                bool user_owns_order = false;
+                {
+                    std::lock_guard<std::mutex> lock(g_open_orders_mutex);
+                    auto oit = g_open_orders.find(uid);
+                    if (oit != g_open_orders.end()) {
+                        for (const auto& o : oit->second) {
+                            if (o.order_id == oid && o.symbol == symbol) {
+                                user_owns_order = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (!user_owns_order && !data->is_admin) {
+                    ws->send(json({{"type", "error"},
+                                   {"message", "Order not found for user"}}).dump(),
+                             uWS::OpCode::TEXT);
+                    ws->send(json({{"type", "cancel_ack"},
+                                   {"symbol", symbol},
+                                   {"order_id", oid},
+                                   {"success", false}}).dump(),
+                             uWS::OpCode::TEXT);
+                    ws->send(openOrdersToJson(uid).dump(), uWS::OpCode::TEXT);
+                    return;
+                }
+
                 bool ok = state->engine->cancelOrder(oid);
 
                 // Remove from open orders tracking
@@ -1102,7 +1189,9 @@ int main() {
                     if (oit != g_open_orders.end()) {
                         auto& vec = oit->second;
                         vec.erase(std::remove_if(vec.begin(), vec.end(),
-                            [oid](const OpenOrderInfo& o) { return o.order_id == oid; }),
+                            [oid, &symbol](const OpenOrderInfo& o) {
+                                return o.order_id == oid && o.symbol == symbol;
+                            }),
                             vec.end());
                     }
                 }
@@ -1122,6 +1211,13 @@ int main() {
 
             // ── deposit ── (admin only: add funds to a bot's portfolio)
             if (msg_type == "deposit") {
+                if (!data->is_admin) {
+                    ws->send(json({{"type", "error"},
+                                   {"message", "Admin privileges required"}}).dump(),
+                             uWS::OpCode::TEXT);
+                    return;
+                }
+
                 std::string bot_id = req.value("bot_id", "");
                 double amount = req.value("amount", 0.0);
 
@@ -1155,7 +1251,9 @@ int main() {
                         {"price",  std::round(state.simulator->currentPrice() * 100.0) / 100.0}
                     });
                 });
-                ws->send(json({{"type", "symbols"}, {"symbols", symbols_json}}).dump(),
+                ws->send(json({{"type", "symbols"},
+                               {"symbols", symbols_json},
+                               {"short_selling", shortSellingConfigToJson()}}).dump(),
                          uWS::OpCode::TEXT);
                 return;
             }

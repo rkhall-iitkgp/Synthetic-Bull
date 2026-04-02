@@ -44,6 +44,9 @@ public:
     // Get list of all symbol configs
     std::vector<SymbolConfig> symbolConfigs() const;
 
+    // Number of active symbols
+    size_t symbolCount() const { return symbols_.size(); }
+
     // Start / stop all simulators
     void startAll();
     void stopAll();

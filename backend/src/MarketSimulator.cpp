@@ -122,10 +122,9 @@ void MarketSimulator::injectOrders() {
                      : 1.0;
     double dynamic_spread = spread_pct_ * std::clamp(vol_ratio, 0.5, 4.0);
 
-    // ── Inventory skew ──
-    double skew = skew_factor_ * inv;
-
     for (int lvl = 1; lvl <= levels_; ++lvl) {
+        // Inventory can change as fills occur within this tick; recompute skew per level.
+        double skew = skew_factor_ * inv;
         double base_offset = dynamic_spread * lvl;
 
         // Skew offsets: positive inventory → push bids down, pull asks closer
@@ -174,7 +173,7 @@ void MarketSimulator::injectOrders() {
             // Update inventory using actual executed quantity.
             double filled_qty = submitted_qty - bid.quantity;
             if (filled_qty > 1e-12) {
-                inventory_.store(inventory_.load() + filled_qty);
+                inv += filled_qty;
             }
         }
 
@@ -198,10 +197,12 @@ void MarketSimulator::injectOrders() {
             // Update inventory using actual executed quantity.
             double filled_qty = submitted_qty - ask.quantity;
             if (filled_qty > 1e-12) {
-                inventory_.store(inventory_.load() - filled_qty);
+                inv -= filled_qty;
             }
         }
     }
+
+    inventory_.store(inv);
 }
 
 // ─── Prune old bot orders ────────────────────────────────────────────────────

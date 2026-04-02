@@ -27,6 +27,10 @@ public:
     std::optional<Order> peekBid() const;
     std::optional<Order> peekAsk() const;
 
+    // Fast best-order view for matching (no copy)
+    const Order* bestBidPtr() const;
+    const Order* bestAskPtr() const;
+
     // Remove the front order from the best bid/ask level
     void popBid();
     void popAsk();
@@ -49,10 +53,15 @@ public:
     size_t askOrderCount() const;
 
 private:
+    struct PriceLevel {
+        std::deque<Order> orders;
+        double total_qty = 0.0;
+    };
+
     // bids: highest price first (greater<>)
-    std::map<double, std::deque<Order>, std::greater<double>> bids_;
+    std::map<double, PriceLevel, std::greater<double>> bids_;
     // asks: lowest price first (default less<>)
-    std::map<double, std::deque<Order>>                       asks_;
+    std::map<double, PriceLevel>                              asks_;
     // fast look-up for cancel
     std::unordered_map<uint64_t, OrderLocation>               index_;
 

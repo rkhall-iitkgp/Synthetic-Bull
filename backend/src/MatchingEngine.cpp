@@ -3,10 +3,15 @@
 
 namespace sb {
 
+namespace {
+constexpr double kQtyEps = 1e-12;
+}
+
 MatchingEngine::MatchingEngine(TradeCallback cb)
     : trade_cb_(std::move(cb)) {}
 
 void MatchingEngine::setTradeCallback(TradeCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
     trade_cb_ = std::move(cb);
 }
 
@@ -18,9 +23,12 @@ int MatchingEngine::processOrder(Order& order) {
     order.timestamp = now_us();
 
     std::vector<Trade> trades;
+    trades.reserve(8);
+    TradeCallback cb;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        cb = trade_cb_;
         if (order.type == OrderType::LIMIT) {
             matchLimit(order, trades);
         } else {
@@ -30,7 +38,7 @@ int MatchingEngine::processOrder(Order& order) {
 
     // Fire callbacks OUTSIDE the mutex to prevent deadlock
     for (auto& t : trades) {
-        if (trade_cb_) trade_cb_(t);
+        if (cb) cb(t);
     }
 
     return static_cast<int>(trades.size());
@@ -57,8 +65,8 @@ OrderBookSnapshot MatchingEngine::getSnapshot(int depth) const {
 void MatchingEngine::matchLimit(Order& order, std::vector<Trade>& trades) {
     if (order.side == Side::BUY) {
         // Match against asks
-        while (order.quantity > 1e-12 && book_.hasAsks()) {
-            auto best = book_.peekAsk();
+        while (order.quantity > kQtyEps) {
+            const Order* best = book_.bestAskPtr();
             if (!best || best->price > order.price) break;   // no cross
 
             double fill_qty   = std::min(order.quantity, best->quantity);
@@ -79,13 +87,13 @@ void MatchingEngine::matchLimit(Order& order, std::vector<Trade>& trades) {
             order.quantity -= fill_qty;
         }
         // Rest unfilled remainder in the book
-        if (order.quantity > 1e-12) {
+        if (order.quantity > kQtyEps) {
             book_.add(order);
         }
     } else {
         // SELL — match against bids
-        while (order.quantity > 1e-12 && book_.hasBids()) {
-            auto best = book_.peekBid();
+        while (order.quantity > kQtyEps) {
+            const Order* best = book_.bestBidPtr();
             if (!best || best->price < order.price) break;
 
             double fill_qty   = std::min(order.quantity, best->quantity);
@@ -105,7 +113,7 @@ void MatchingEngine::matchLimit(Order& order, std::vector<Trade>& trades) {
             book_.reduceFrontBid(fill_qty);
             order.quantity -= fill_qty;
         }
-        if (order.quantity > 1e-12) {
+        if (order.quantity > kQtyEps) {
             book_.add(order);
         }
     }
@@ -116,8 +124,8 @@ void MatchingEngine::matchLimit(Order& order, std::vector<Trade>& trades) {
 
 void MatchingEngine::matchMarket(Order& order, std::vector<Trade>& trades) {
     if (order.side == Side::BUY) {
-        while (order.quantity > 1e-12 && book_.hasAsks()) {
-            auto best = book_.peekAsk();
+        while (order.quantity > kQtyEps) {
+            const Order* best = book_.bestAskPtr();
             if (!best) break;
 
             double fill_qty   = std::min(order.quantity, best->quantity);
@@ -139,8 +147,8 @@ void MatchingEngine::matchMarket(Order& order, std::vector<Trade>& trades) {
         }
         // Market orders never rest
     } else {
-        while (order.quantity > 1e-12 && book_.hasBids()) {
-            auto best = book_.peekBid();
+        while (order.quantity > kQtyEps) {
+            const Order* best = book_.bestBidPtr();
             if (!best) break;
 
             double fill_qty   = std::min(order.quantity, best->quantity);

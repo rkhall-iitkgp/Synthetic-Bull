@@ -6,14 +6,19 @@ namespace sb {
 // ─── Add ─────────────────────────────────────────────────────────────────────
 
 void OrderBook::add(const Order& order) {
-    index_[order.id] = {order.side, order.price};
     if (order.side == Side::BUY) {
-        bids_[order.price].push_back(order);
+        auto& level = bids_[order.price];
+        level.orders.push_back(order);
+        level.total_qty += order.quantity;
         ++bid_count_;
     } else {
-        asks_[order.price].push_back(order);
+        auto& level = asks_[order.price];
+        level.orders.push_back(order);
+        level.total_qty += order.quantity;
         ++ask_count_;
     }
+
+    index_[order.id] = {order.side, order.price};
 }
 
 // ─── Cancel ──────────────────────────────────────────────────────────────────
@@ -22,30 +27,35 @@ bool OrderBook::cancel(uint64_t order_id) {
     auto it = index_.find(order_id);
     if (it == index_.end()) return false;
 
-    auto [side, price] = it->second;
-    index_.erase(it);
+    const auto [side, price] = it->second;
 
     if (side == Side::BUY) {
         auto map_it = bids_.find(price);
         if (map_it == bids_.end()) return false;
-        auto& dq = map_it->second;
+        auto& level = map_it->second;
+        auto& dq = level.orders;
         for (auto dq_it = dq.begin(); dq_it != dq.end(); ++dq_it) {
             if (dq_it->id == order_id) {
+                level.total_qty -= dq_it->quantity;
                 dq.erase(dq_it);
                 --bid_count_;
-                if (dq.empty()) bids_.erase(map_it);
+                if (dq.empty() || level.total_qty <= 1e-12) bids_.erase(map_it);
+                index_.erase(it);
                 return true;
             }
         }
     } else {
         auto map_it = asks_.find(price);
         if (map_it == asks_.end()) return false;
-        auto& dq = map_it->second;
+        auto& level = map_it->second;
+        auto& dq = level.orders;
         for (auto dq_it = dq.begin(); dq_it != dq.end(); ++dq_it) {
             if (dq_it->id == order_id) {
+                level.total_qty -= dq_it->quantity;
                 dq.erase(dq_it);
                 --ask_count_;
-                if (dq.empty()) asks_.erase(map_it);
+                if (dq.empty() || level.total_qty <= 1e-12) asks_.erase(map_it);
+                index_.erase(it);
                 return true;
             }
         }
@@ -56,13 +66,29 @@ bool OrderBook::cancel(uint64_t order_id) {
 // ─── Peek ────────────────────────────────────────────────────────────────────
 
 std::optional<Order> OrderBook::peekBid() const {
-    if (bids_.empty()) return std::nullopt;
-    return bids_.begin()->second.front();
+    const Order* best = bestBidPtr();
+    if (!best) return std::nullopt;
+    return *best;
 }
 
 std::optional<Order> OrderBook::peekAsk() const {
-    if (asks_.empty()) return std::nullopt;
-    return asks_.begin()->second.front();
+    const Order* best = bestAskPtr();
+    if (!best) return std::nullopt;
+    return *best;
+}
+
+const Order* OrderBook::bestBidPtr() const {
+    if (bids_.empty()) return nullptr;
+    const auto& level = bids_.begin()->second;
+    if (level.orders.empty()) return nullptr;
+    return &level.orders.front();
+}
+
+const Order* OrderBook::bestAskPtr() const {
+    if (asks_.empty()) return nullptr;
+    const auto& level = asks_.begin()->second;
+    if (level.orders.empty()) return nullptr;
+    return &level.orders.front();
 }
 
 // ─── Pop ─────────────────────────────────────────────────────────────────────
@@ -70,37 +96,61 @@ std::optional<Order> OrderBook::peekAsk() const {
 void OrderBook::popBid() {
     if (bids_.empty()) return;
     auto it = bids_.begin();
-    auto& dq = it->second;
+    auto& level = it->second;
+    auto& dq = level.orders;
+    level.total_qty -= dq.front().quantity;
     index_.erase(dq.front().id);
     dq.pop_front();
     --bid_count_;
-    if (dq.empty()) bids_.erase(it);
+    if (dq.empty() || level.total_qty <= 1e-12) bids_.erase(it);
 }
 
 void OrderBook::popAsk() {
     if (asks_.empty()) return;
     auto it = asks_.begin();
-    auto& dq = it->second;
+    auto& level = it->second;
+    auto& dq = level.orders;
+    level.total_qty -= dq.front().quantity;
     index_.erase(dq.front().id);
     dq.pop_front();
     --ask_count_;
-    if (dq.empty()) asks_.erase(it);
+    if (dq.empty() || level.total_qty <= 1e-12) asks_.erase(it);
 }
 
 // ─── Reduce front ────────────────────────────────────────────────────────────
 
 void OrderBook::reduceFrontBid(double qty) {
     if (bids_.empty()) return;
-    auto& front = bids_.begin()->second.front();
-    front.quantity -= qty;
-    if (front.quantity <= 1e-12) popBid();
+    auto& level = bids_.begin()->second;
+    auto& front = level.orders.front();
+    const double consumed = std::min(qty, front.quantity);
+    front.quantity -= consumed;
+    level.total_qty -= consumed;
+    if (front.quantity <= 1e-12) {
+        index_.erase(front.id);
+        level.orders.pop_front();
+        --bid_count_;
+        if (level.orders.empty() || level.total_qty <= 1e-12) {
+            bids_.erase(bids_.begin());
+        }
+    }
 }
 
 void OrderBook::reduceFrontAsk(double qty) {
     if (asks_.empty()) return;
-    auto& front = asks_.begin()->second.front();
-    front.quantity -= qty;
-    if (front.quantity <= 1e-12) popAsk();
+    auto& level = asks_.begin()->second;
+    auto& front = level.orders.front();
+    const double consumed = std::min(qty, front.quantity);
+    front.quantity -= consumed;
+    level.total_qty -= consumed;
+    if (front.quantity <= 1e-12) {
+        index_.erase(front.id);
+        level.orders.pop_front();
+        --ask_count_;
+        if (level.orders.empty() || level.total_qty <= 1e-12) {
+            asks_.erase(asks_.begin());
+        }
+    }
 }
 
 // ─── Snapshot ────────────────────────────────────────────────────────────────
@@ -108,22 +158,20 @@ void OrderBook::reduceFrontAsk(double qty) {
 OrderBookSnapshot OrderBook::getSnapshot(int depth) const {
     OrderBookSnapshot snap;
     snap.timestamp = now_us();
+    snap.bids.reserve(std::max(depth, 0));
+    snap.asks.reserve(std::max(depth, 0));
 
     int count = 0;
-    for (auto& [price, dq] : bids_) {
+    for (const auto& [price, level] : bids_) {
         if (count >= depth) break;
-        double total = 0.0;
-        for (auto& o : dq) total += o.quantity;
-        snap.bids.push_back({price, total, static_cast<int>(dq.size())});
+        snap.bids.push_back({price, level.total_qty, static_cast<int>(level.orders.size())});
         ++count;
     }
 
     count = 0;
-    for (auto& [price, dq] : asks_) {
+    for (const auto& [price, level] : asks_) {
         if (count >= depth) break;
-        double total = 0.0;
-        for (auto& o : dq) total += o.quantity;
-        snap.asks.push_back({price, total, static_cast<int>(dq.size())});
+        snap.asks.push_back({price, level.total_qty, static_cast<int>(level.orders.size())});
         ++count;
     }
 
