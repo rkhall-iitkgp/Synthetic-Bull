@@ -70,6 +70,8 @@ void MatchingEngine::matchLimit(Order& order, std::vector<Trade>& trades) {
             t.quantity  = fill_qty;
             t.buyer_id  = order.user_id;
             t.seller_id = best->user_id;
+            t.buyer_order_id = order.id;
+            t.seller_order_id = best->id;
             t.timestamp = now_us();
             trades.push_back(t);
 
@@ -95,6 +97,8 @@ void MatchingEngine::matchLimit(Order& order, std::vector<Trade>& trades) {
             t.quantity  = fill_qty;
             t.buyer_id  = best->user_id;
             t.seller_id = order.user_id;
+            t.buyer_order_id = best->id;
+            t.seller_order_id = order.id;
             t.timestamp = now_us();
             trades.push_back(t);
 
@@ -125,6 +129,8 @@ void MatchingEngine::matchMarket(Order& order, std::vector<Trade>& trades) {
             t.quantity  = fill_qty;
             t.buyer_id  = order.user_id;
             t.seller_id = best->user_id;
+            t.buyer_order_id = order.id;
+            t.seller_order_id = best->id;
             t.timestamp = now_us();
             trades.push_back(t);
 
@@ -146,6 +152,8 @@ void MatchingEngine::matchMarket(Order& order, std::vector<Trade>& trades) {
             t.quantity  = fill_qty;
             t.buyer_id  = best->user_id;
             t.seller_id = order.user_id;
+            t.buyer_order_id = best->id;
+            t.seller_order_id = order.id;
             t.timestamp = now_us();
             trades.push_back(t);
 

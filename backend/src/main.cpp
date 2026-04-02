@@ -351,6 +351,8 @@ static json tradeToJson(const sb::Trade& t) {
         {"qty",    std::round(t.quantity * 100000.0) / 100000.0},
         {"buyer",  t.buyer_id},
         {"seller", t.seller_id},
+        {"buyer_order_id", t.buyer_order_id},
+        {"seller_order_id", t.seller_order_id},
         {"ts",     t.timestamp}
     };
 }
@@ -375,58 +377,44 @@ static void onTrade(const std::string& symbol, const sb::Trade& trade) {
     {
         std::lock_guard<std::mutex> lock(g_portfolio_mutex);
 
-        auto it_b = g_portfolios.find(trade.buyer_id);
-        if (it_b != g_portfolios.end()) {
-            auto& pos = it_b->second.positions[symbol];
-            applyTradeToPosition(pos, it_b->second, trade.price, trade.quantity, true);
-        }
+        if (trade.buyer_id != trade.seller_id) {
+            auto it_b = g_portfolios.find(trade.buyer_id);
+            if (it_b != g_portfolios.end()) {
+                auto& pos = it_b->second.positions[symbol];
+                applyTradeToPosition(pos, it_b->second, trade.price, trade.quantity, true);
+            }
 
-        auto it_s = g_portfolios.find(trade.seller_id);
-        if (it_s != g_portfolios.end()) {
-            auto& pos = it_s->second.positions[symbol];
-            applyTradeToPosition(pos, it_s->second, trade.price, trade.quantity, false);
+            auto it_s = g_portfolios.find(trade.seller_id);
+            if (it_s != g_portfolios.end()) {
+                auto& pos = it_s->second.positions[symbol];
+                applyTradeToPosition(pos, it_s->second, trade.price, trade.quantity, false);
+            }
         }
     }
 
     // 2. Reduce filled orders from open_orders tracking
     {
         std::lock_guard<std::mutex> lock(g_open_orders_mutex);
-        // Reduce from buyer's open orders
-        auto bit = g_open_orders.find(trade.buyer_id);
-        if (bit != g_open_orders.end()) {
-            auto& vec = bit->second;
-            for (auto it = vec.begin(); it != vec.end();) {
-                if (it->symbol == symbol && it->side == "buy" && std::abs(it->price - trade.price) < 0.005) {
-                    it->remaining_qty -= trade.quantity;
-                    if (it->remaining_qty <= 1e-8) {
-                        it = vec.erase(it);
-                    } else {
-                        ++it;
-                    }
-                    break;
-                } else {
-                    ++it;
-                }
+        auto reduceByOrderId = [&](const std::string& uid, uint64_t order_id) {
+            if (order_id == 0) return;
+
+            auto it = g_open_orders.find(uid);
+            if (it == g_open_orders.end()) return;
+
+            auto& vec = it->second;
+            auto oit = std::find_if(vec.begin(), vec.end(),
+                [order_id](const OpenOrderInfo& o) { return o.order_id == order_id; });
+
+            if (oit == vec.end()) return;
+
+            oit->remaining_qty -= trade.quantity;
+            if (oit->remaining_qty <= 1e-8) {
+                vec.erase(oit);
             }
-        }
-        // Reduce from seller's open orders
-        auto sit = g_open_orders.find(trade.seller_id);
-        if (sit != g_open_orders.end()) {
-            auto& vec = sit->second;
-            for (auto it = vec.begin(); it != vec.end();) {
-                if (it->symbol == symbol && it->side == "sell" && std::abs(it->price - trade.price) < 0.005) {
-                    it->remaining_qty -= trade.quantity;
-                    if (it->remaining_qty <= 1e-8) {
-                        it = vec.erase(it);
-                    } else {
-                        ++it;
-                    }
-                    break;
-                } else {
-                    ++it;
-                }
-            }
-        }
+        };
+
+        reduceByOrderId(trade.buyer_id, trade.buyer_order_id);
+        reduceByOrderId(trade.seller_id, trade.seller_order_id);
     }
 
     // 3. Feed candle aggregator for this symbol
@@ -750,6 +738,23 @@ int main() {
                 return;
             }
 
+            // ── get_portfolio ──
+            if (msg_type == "get_portfolio") {
+                std::lock_guard<std::mutex> lock(g_portfolio_mutex);
+                auto it = g_portfolios.find(uid);
+                if (it == g_portfolios.end()) {
+                    it = g_portfolios.emplace(uid, sb::Portfolio{}).first;
+                }
+                ws->send(portfolioToJson(it->second).dump(), uWS::OpCode::TEXT);
+                return;
+            }
+
+            // ── get_open_orders ──
+            if (msg_type == "get_open_orders") {
+                ws->send(openOrdersToJson(uid).dump(), uWS::OpCode::TEXT);
+                return;
+            }
+
             // ── place_order ──
             if (msg_type == "place_order") {
                 std::string symbol   = req.value("symbol", "");
@@ -904,10 +909,31 @@ int main() {
                 std::string symbol = req.value("symbol", "");
                 uint64_t oid = req.value("order_id", (uint64_t)0);
 
+                if (oid == 0) {
+                    ws->send(json({{"type", "error"},
+                                   {"message", "order_id is required"}}).dump(),
+                             uWS::OpCode::TEXT);
+                    return;
+                }
+
+                // Support cancel requests that provide only an order_id.
+                if (symbol.empty()) {
+                    std::lock_guard<std::mutex> lock(g_open_orders_mutex);
+                    auto oit = g_open_orders.find(uid);
+                    if (oit != g_open_orders.end()) {
+                        const auto& vec = oit->second;
+                        auto found = std::find_if(vec.begin(), vec.end(),
+                            [oid](const OpenOrderInfo& o) { return o.order_id == oid; });
+                        if (found != vec.end()) {
+                            symbol = found->symbol;
+                        }
+                    }
+                }
+
                 auto* state = g_exchange.get(symbol);
                 if (!state) {
                     ws->send(json({{"type", "error"},
-                                   {"message", "Unknown symbol: " + symbol}}).dump(),
+                                   {"message", "Unknown symbol for order_id " + std::to_string(oid)}}).dump(),
                              uWS::OpCode::TEXT);
                     return;
                 }

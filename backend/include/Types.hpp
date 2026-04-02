@@ -72,6 +72,8 @@ struct Trade {
     double      quantity  = 0.0;
     std::string buyer_id;
     std::string seller_id;
+    uint64_t    buyer_order_id = 0;
+    uint64_t    seller_order_id = 0;
     uint64_t    timestamp = 0;
 };
 

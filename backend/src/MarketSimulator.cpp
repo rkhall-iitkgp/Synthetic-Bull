@@ -157,7 +157,7 @@ void MarketSimulator::injectOrders() {
         // Limit BID
         if (place_bid) {
             Order bid;
-            bid.user_id  = "sim_bot";
+            bid.user_id  = "sim_mm_bot";
             bid.symbol   = symbol_;
             bid.side     = Side::BUY;
             bid.type     = OrderType::LIMIT;
@@ -176,7 +176,7 @@ void MarketSimulator::injectOrders() {
         // Limit ASK
         if (place_ask) {
             Order ask;
-            ask.user_id  = "sim_bot";
+            ask.user_id  = "sim_mm_bot";
             ask.symbol   = symbol_;
             ask.side     = Side::SELL;
             ask.type     = OrderType::LIMIT;
