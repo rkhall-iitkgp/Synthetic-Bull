@@ -1,4 +1,4 @@
-from shared.config import MM_BASE_SPREAD_PCT, MM_INVENTORY_SKEW, MM_MAX_INVENTORY, MM_QUOTE_QTY
+from market_maker.config import MM_BASE_SPREAD_PCT, MM_INVENTORY_SKEW, MM_MAX_INVENTORY, MM_QUOTE_QTY
 
 
 class SpreadCalculator:

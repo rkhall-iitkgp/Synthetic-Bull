@@ -1,4 +1,4 @@
-from shared.config import ALPHA_DAILY_DRAWDOWN
+from alpha.config import ALPHA_DAILY_DRAWDOWN
 
 TICKS_PER_DAY = 86_400
 

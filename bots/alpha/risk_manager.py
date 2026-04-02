@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 
-from alpha.indicators import compute_atr
-from shared.config import (
+from alpha.config import (
     ALPHA_ATR_PERIOD,
     ALPHA_ATR_RISK_MULT,
     ALPHA_COOLDOWN_TICKS,
@@ -12,6 +11,7 @@ from shared.config import (
     PNL_FLOOR,
     STARTING_EQUITY,
 )
+from alpha.indicators import compute_atr
 
 
 @dataclass

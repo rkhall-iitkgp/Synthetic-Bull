@@ -1,4 +1,4 @@
-from shared.config import MM_MAX_INVENTORY, STARTING_EQUITY
+from market_maker.config import MM_MAX_INVENTORY, STARTING_EQUITY
 
 
 class InventoryManager:

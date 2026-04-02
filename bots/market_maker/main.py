@@ -12,21 +12,40 @@ Key profitability improvements:
 """
 
 import asyncio
+from pathlib import Path
+import sys
 
+from market_maker.config import (
+    BOT_API_KEY,
+    EXCHANGE_WS_URL,
+    MM_QUOTE_QTY,
+    MM_REQUOTE_INTERVAL,
+    MM_SYMBOL,
+    PNL_FLOOR,
+    STARTING_EQUITY,
+)
 from market_maker.inventory_manager import InventoryManager
 from market_maker.kpi_tracker import MMKPITracker
 from market_maker.order_tracker import OrderTracker
 from market_maker.spread_calculator import SpreadCalculator
 from market_maker.status_server import run as run_status_server
 from market_maker.status_server import update_status
-from shared.config import MM_QUOTE_QTY, MM_REQUOTE_INTERVAL, MM_SYMBOL, PNL_FLOOR, STARTING_EQUITY
-from shared.exchange_client import ExchangeClient
+
+try:
+    from synthetic_bull_sdk import SyntheticBullClient
+except ModuleNotFoundError:
+    sdk_path = Path(__file__).resolve().parents[2] / "sdk" / "python"
+    if str(sdk_path) not in sys.path:
+        sys.path.append(str(sdk_path))
+    from synthetic_bull_sdk import SyntheticBullClient
 
 
 class MarketMakerBot:
     def __init__(self):
         self.symbol: str = MM_SYMBOL
-        self.client = ExchangeClient(
+        self.client = SyntheticBullClient(
+            ws_url=EXCHANGE_WS_URL,
+            api_key=BOT_API_KEY,
             on_message=self._handle_message,
             on_reconnect=self._on_reconnect,
         )
@@ -43,12 +62,12 @@ class MarketMakerBot:
 
     async def run(self):
         await asyncio.gather(
-            self.client.run(),
+            self.client.run_forever(),
             self._requote_loop(),
             run_status_server(),
         )
 
-    async def _on_reconnect(self):
+    async def _on_reconnect(self, _msg: dict | None = None):
         """Cancel all known orders on reconnect to prevent orphaned positions."""
         print("[MMBot] Reconnect detected — cancelling all tracked orders")
         for oid in self.tracker.get_all_ids():

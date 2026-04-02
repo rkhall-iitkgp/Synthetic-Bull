@@ -1,4 +1,4 @@
-from shared.config import STARTING_EQUITY
+from market_maker.config import STARTING_EQUITY
 
 
 class MMKPITracker:

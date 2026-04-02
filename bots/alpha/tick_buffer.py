@@ -1,6 +1,6 @@
 from collections import deque
 
-from shared.config import ALPHA_MIN_TICKS, ALPHA_PRICE_WINDOW
+from alpha.config import ALPHA_MIN_TICKS, ALPHA_PRICE_WINDOW
 
 
 class TickBuffer:

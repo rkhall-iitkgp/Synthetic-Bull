@@ -14,9 +14,21 @@ Key profitability improvements:
 """
 
 import asyncio
+from pathlib import Path
+import sys
 import threading
 import time
 
+from alpha.config import (
+    ALPHA_HURST_MR,
+    ALPHA_HURST_TRENDING,
+    ALPHA_HURST_WINDOW,
+    ALPHA_SYMBOL,
+    ALPHA_TP_PCT,
+    BOT_API_KEY,
+    EXCHANGE_WS_URL,
+    STARTING_EQUITY,
+)
 from alpha.drawdown_guard import DrawdownGuard
 from alpha.indicators import compute_hurst
 from alpha.kpi_tracker import KPITracker
@@ -25,22 +37,22 @@ from alpha.signal_scorer import RegimeSignalProcessor
 from alpha.status_server import run as run_status_server
 from alpha.status_server import update_status
 from alpha.tick_buffer import TickBuffer
-from shared.config import (
-    ALPHA_HURST_MR,
-    ALPHA_HURST_TRENDING,
-    ALPHA_HURST_WINDOW,
-    ALPHA_STOP_PCT,
-    ALPHA_SYMBOL,
-    ALPHA_TP_PCT,
-    STARTING_EQUITY,
-)
-from shared.exchange_client import ExchangeClient
+
+try:
+    from synthetic_bull_sdk import SyntheticBullClient
+except ModuleNotFoundError:
+    sdk_path = Path(__file__).resolve().parents[2] / "sdk" / "python"
+    if str(sdk_path) not in sys.path:
+        sys.path.append(str(sdk_path))
+    from synthetic_bull_sdk import SyntheticBullClient
 
 
 class AlphaBot:
     def __init__(self):
         self.symbol: str = ALPHA_SYMBOL
-        self.client = ExchangeClient(
+        self.client = SyntheticBullClient(
+            ws_url=EXCHANGE_WS_URL,
+            api_key=BOT_API_KEY,
             on_message=self._handle_message,
             on_reconnect=self._on_reconnect,
         )
@@ -75,7 +87,7 @@ class AlphaBot:
         hurst_thread.start()
 
         await asyncio.gather(
-            self.client.run(),
+            self.client.run_forever(),
             run_status_server(),
         )
 
@@ -99,7 +111,7 @@ class AlphaBot:
                     print(f"[AlphaBot] Regime: {self._regime} -> {new_regime} (H={hurst:.3f})")
                 self._regime = new_regime
 
-    async def _on_reconnect(self):
+    async def _on_reconnect(self, _msg: dict | None = None):
         """Cancel all known orders on reconnect."""
         print("[AlphaBot] Reconnect detected - cancelling TP order if any")
         if self.pending_tp_order_id is not None:

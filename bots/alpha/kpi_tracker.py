@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from shared.config import STARTING_EQUITY
+from alpha.config import STARTING_EQUITY
 
 
 @dataclass

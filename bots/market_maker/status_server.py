@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-from shared.config import MM_BOT_PORT
+from market_maker.config import MM_BOT_PORT
 
 _state: dict = {
     "equity": 100000.0,

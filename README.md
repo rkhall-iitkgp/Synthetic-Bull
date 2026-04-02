@@ -224,3 +224,30 @@ All messages except `ping` consume one token from a per-connection bucket (50 to
 - Volume clustering evolves **log(activity)** for numerical stability
 - The Heston variance floor uses **`abs(v) ≥ 1e-6`** (reflection scheme) to prevent price freezing near zero
 - **dt_ calibration**: `dt_ = 0.00008` gives ≈1 trading-second per 20ms tick, compressing one full trading day into ~6.5 minutes of real time. This guarantees prices remain stable over hours of continuous operation.
+
+---
+
+## Python Bot SDK
+
+For external bot developers, an importable Python SDK is available at:
+
+- `sdk/python`
+
+Install locally from the repo root:
+
+```bash
+pip install -e ./sdk/python
+```
+
+Main entry points:
+
+- `synthetic_bull_sdk.SyntheticBullClient` for WebSocket trading and market data
+- `synthetic_bull_sdk.AdminApiClient` for admin HTTP APIs (bot creation, KPI, sessions)
+
+Detailed usage guide:
+
+- `sdk/python/USAGE.md`
+
+Example bot:
+
+- `sdk/python/examples/minimal_bot.py`

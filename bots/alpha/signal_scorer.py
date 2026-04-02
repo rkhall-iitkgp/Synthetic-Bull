@@ -1,5 +1,5 @@
 from alpha.indicators import momentum_signal, order_book_imbalance, zscore_signal
-from shared.config import ALPHA_MOMENTUM_THRESH, ALPHA_ZSCORE_THRESH
+from alpha.config import ALPHA_MOMENTUM_THRESH, ALPHA_ZSCORE_THRESH
 
 
 class RegimeSignalProcessor:
