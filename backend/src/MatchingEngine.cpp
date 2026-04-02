@@ -51,6 +51,14 @@ bool MatchingEngine::cancelOrder(uint64_t order_id) {
     return book_.cancel(order_id);
 }
 
+bool MatchingEngine::cancelOrderForUser(uint64_t order_id, const std::string& user_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto ord = book_.findOrder(order_id);
+    if (!ord.has_value()) return false;
+    if (ord->user_id != user_id) return false;
+    return book_.cancel(order_id);
+}
+
 // ─── getSnapshot ─────────────────────────────────────────────────────────────
 
 OrderBookSnapshot MatchingEngine::getSnapshot(int depth) const {

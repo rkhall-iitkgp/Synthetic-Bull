@@ -23,6 +23,9 @@ public:
     // Cancel an order by ID.  Returns true if found and removed.
     bool cancel(uint64_t order_id);
 
+    // Find an order by ID without modifying the book.
+    std::optional<Order> findOrder(uint64_t order_id) const;
+
     // Peek at the best bid/ask without removing
     std::optional<Order> peekBid() const;
     std::optional<Order> peekAsk() const;

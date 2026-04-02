@@ -63,6 +63,31 @@ bool OrderBook::cancel(uint64_t order_id) {
     return false;
 }
 
+std::optional<Order> OrderBook::findOrder(uint64_t order_id) const {
+    auto it = index_.find(order_id);
+    if (it == index_.end()) return std::nullopt;
+
+    const auto [side, price] = it->second;
+
+    if (side == Side::BUY) {
+        auto map_it = bids_.find(price);
+        if (map_it == bids_.end()) return std::nullopt;
+        const auto& dq = map_it->second.orders;
+        for (const auto& o : dq) {
+            if (o.id == order_id) return o;
+        }
+    } else {
+        auto map_it = asks_.find(price);
+        if (map_it == asks_.end()) return std::nullopt;
+        const auto& dq = map_it->second.orders;
+        for (const auto& o : dq) {
+            if (o.id == order_id) return o;
+        }
+    }
+
+    return std::nullopt;
+}
+
 // ─── Peek ────────────────────────────────────────────────────────────────────
 
 std::optional<Order> OrderBook::peekBid() const {

@@ -22,6 +22,9 @@ public:
     // Cancel a resting order by ID.  Returns true if found and removed.
     bool cancelOrder(uint64_t order_id);
 
+    // Cancel only if the order exists and is owned by user_id.
+    bool cancelOrderForUser(uint64_t order_id, const std::string& user_id);
+
     // Thread-safe snapshot of the order book
     OrderBookSnapshot getSnapshot(int depth = 20) const;
 

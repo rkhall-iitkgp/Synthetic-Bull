@@ -155,6 +155,8 @@ static std::mutex g_open_orders_mutex;
 // Each trade already has its symbol tagged
 static std::deque<sb::Trade> g_trade_queue;
 static std::mutex g_trade_mutex;
+static constexpr size_t kMaxTradeQueueSize = 50000;
+static std::atomic<uint64_t> g_trade_queue_dropped{0};
 
 // uWS loop pointer (set once in main)
 static uWS::Loop* g_loop = nullptr;
@@ -514,6 +516,30 @@ static json obSnapshotToJson(const std::string& symbol,
     return j;
 }
 
+static uint64_t obSnapshotSignature(const sb::OrderBookSnapshot& snap) {
+    uint64_t h = 1469598103934665603ULL;
+    auto mix = [&](uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ULL;
+    };
+
+    mix(static_cast<uint64_t>(std::llround(snap.mid * 100.0)));
+    mix(static_cast<uint64_t>(std::llround(snap.spread * 100.0)));
+
+    for (const auto& lvl : snap.bids) {
+        mix(static_cast<uint64_t>(std::llround(lvl.price * 100.0)));
+        mix(static_cast<uint64_t>(std::llround(lvl.total_qty * 100000.0)));
+        mix(static_cast<uint64_t>(lvl.order_count));
+    }
+    for (const auto& lvl : snap.asks) {
+        mix(static_cast<uint64_t>(std::llround(lvl.price * 100.0)));
+        mix(static_cast<uint64_t>(std::llround(lvl.total_qty * 100000.0)));
+        mix(static_cast<uint64_t>(lvl.order_count));
+    }
+
+    return h;
+}
+
 static json tradeToJson(const sb::Trade& t) {
     return {
         {"type",   "trade"},
@@ -598,6 +624,10 @@ static void onTrade(const std::string& symbol, const sb::Trade& trade) {
     // 4. Push to trade queue for broadcasting
     {
         std::lock_guard<std::mutex> lock(g_trade_mutex);
+        if (g_trade_queue.size() >= kMaxTradeQueueSize) {
+            g_trade_queue.pop_front();
+            g_trade_queue_dropped.fetch_add(1, std::memory_order_relaxed);
+        }
         g_trade_queue.push_back(trade);
     }
 }
@@ -615,17 +645,43 @@ static void onCandle(const std::string& symbol, const sb::Candle& candle) {
 // ─── Broadcaster thread ──────────────────────────────────────────────────────
 
 static void broadcasterThread() {
+    std::unordered_map<std::string, uint64_t> last_ob_signatures;
+    uint64_t last_full_sync_ms = 0;
+
     while (true) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         if (!g_loop || !g_app) continue;
+
+        uint64_t dropped = g_trade_queue_dropped.exchange(0, std::memory_order_relaxed);
+        if (dropped > 0) {
+            std::cerr << "[!] Trade queue backpressure dropped " << dropped
+                      << " trade events in last interval\n";
+        }
+
+        uint64_t now_ms = sb::now_ms();
+        bool force_full_sync = (last_full_sync_ms == 0) || (now_ms - last_full_sync_ms >= 2000);
+        if (force_full_sync) {
+            last_full_sync_ms = now_ms;
+        }
 
         // 1. Order book snapshots for ALL symbols
         std::vector<std::string> ob_msgs;
         ob_msgs.reserve(g_exchange.symbolCount());
         g_exchange.forEachSymbol([&](const std::string& sym, sb::SymbolState& state) {
             auto snap = state.engine->getSnapshot(20);
-            ob_msgs.push_back(obSnapshotToJson(sym, snap).dump());
+            uint64_t sig = obSnapshotSignature(snap);
+
+            bool changed = true;
+            auto it_sig = last_ob_signatures.find(sym);
+            if (it_sig != last_ob_signatures.end() && it_sig->second == sig) {
+                changed = false;
+            }
+
+            if (force_full_sync || changed) {
+                ob_msgs.push_back(obSnapshotToJson(sym, snap).dump());
+                last_ob_signatures[sym] = sig;
+            }
 
             // Feed GBM price to candle aggregator
             state.candles->addPrice(state.simulator->currentPrice());
@@ -1152,24 +1208,16 @@ int main() {
                     return;
                 }
 
-                // Non-admin users can only cancel their own tracked open orders.
-                bool user_owns_order = false;
-                {
-                    std::lock_guard<std::mutex> lock(g_open_orders_mutex);
-                    auto oit = g_open_orders.find(uid);
-                    if (oit != g_open_orders.end()) {
-                        for (const auto& o : oit->second) {
-                            if (o.order_id == oid && o.symbol == symbol) {
-                                user_owns_order = true;
-                                break;
-                            }
-                        }
-                    }
+                bool ok = false;
+                if (data->is_admin) {
+                    ok = state->engine->cancelOrder(oid);
+                } else {
+                    ok = state->engine->cancelOrderForUser(oid, uid);
                 }
 
-                if (!user_owns_order && !data->is_admin) {
+                if (!ok && !data->is_admin) {
                     ws->send(json({{"type", "error"},
-                                   {"message", "Order not found for user"}}).dump(),
+                                   {"message", "Order not found for user or already closed"}}).dump(),
                              uWS::OpCode::TEXT);
                     ws->send(json({{"type", "cancel_ack"},
                                    {"symbol", symbol},
@@ -1180,19 +1228,28 @@ int main() {
                     return;
                 }
 
-                bool ok = state->engine->cancelOrder(oid);
-
                 // Remove from open orders tracking
                 if (ok) {
                     std::lock_guard<std::mutex> lock(g_open_orders_mutex);
-                    auto oit = g_open_orders.find(uid);
-                    if (oit != g_open_orders.end()) {
-                        auto& vec = oit->second;
-                        vec.erase(std::remove_if(vec.begin(), vec.end(),
-                            [oid, &symbol](const OpenOrderInfo& o) {
-                                return o.order_id == oid && o.symbol == symbol;
-                            }),
-                            vec.end());
+                    if (data->is_admin) {
+                        for (auto& kv : g_open_orders) {
+                            auto& vec = kv.second;
+                            vec.erase(std::remove_if(vec.begin(), vec.end(),
+                                [oid, &symbol](const OpenOrderInfo& o) {
+                                    return o.order_id == oid && o.symbol == symbol;
+                                }),
+                                vec.end());
+                        }
+                    } else {
+                        auto oit = g_open_orders.find(uid);
+                        if (oit != g_open_orders.end()) {
+                            auto& vec = oit->second;
+                            vec.erase(std::remove_if(vec.begin(), vec.end(),
+                                [oid, &symbol](const OpenOrderInfo& o) {
+                                    return o.order_id == oid && o.symbol == symbol;
+                                }),
+                                vec.end());
+                        }
                     }
                 }
 

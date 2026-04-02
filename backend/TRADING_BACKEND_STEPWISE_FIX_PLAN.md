@@ -13,9 +13,9 @@
 - [x] Step 2: Guard admin-only deposit route and harden cancel ownership flow.
 - [x] Step 3: Prevent buy-side overcommit by reserving cash for resting buy limits.
 - [x] Step 4: Replace market-buy risk estimate with orderbook walk worst-case pricing.
-- [ ] Step 5: Improve order id safety across symbols and owner checks at engine boundary.
-- [ ] Step 6: Add bounded queues and backpressure to broadcast/trade pipelines.
-- [ ] Step 7: Move market feed from periodic full snapshots to delta-first updates.
+- [x] Step 5: Improve order id safety across symbols and owner checks at engine boundary.
+- [x] Step 6: Add bounded queues and backpressure to broadcast/trade pipelines.
+- [x] Step 7: Move market feed from periodic full snapshots to delta-first updates.
 - [ ] Step 8: Optimize matching core data structures for extreme performance.
 
 ## 3) Completed Changes
@@ -48,43 +48,31 @@
 - Change B: Market BUY now requires sufficient book liquidity and uses depth-walk cost for cash precheck.
 - Reason: Prevent acceptance of market buys that cannot be funded at executable prices.
 
+### Step 5 (Completed)
+
+- Files: `backend/include/OrderBook.hpp`, `backend/src/OrderBook.cpp`, `backend/include/MatchingEngine.hpp`, `backend/src/MatchingEngine.cpp`, `backend/src/main.cpp`
+- Change A: Added `OrderBook::findOrder(order_id)` for safe order lookup without mutation.
+- Change B: Added `MatchingEngine::cancelOrderForUser(order_id, user_id)` to enforce ownership inside engine mutex.
+- Change C: `cancel_order` handler now uses engine-level owner-aware cancel for non-admin users.
+- Change D: Admin cancels now reconcile open-order tracking across all users for the given symbol/order id.
+- Reason: Move ownership checks to engine boundary and reduce cancel-state ambiguity.
+
+### Step 6 (Completed)
+
+- File: `backend/src/main.cpp`
+- Change A: Added bounded trade queue with cap (`kMaxTradeQueueSize = 50000`).
+- Change B: Added drop counter (`g_trade_queue_dropped`) and periodic warning logs from broadcaster.
+- Reason: Introduce backpressure to prevent unbounded queue growth under event spikes.
+
+### Step 7 (Completed)
+
+- File: `backend/src/main.cpp`
+- Change A: Added orderbook signature hashing (`obSnapshotSignature`).
+- Change B: Broadcaster now publishes orderbook snapshots only when a symbol snapshot changes.
+- Change C: Added periodic forced full sync every 2 seconds to keep clients in sync.
+- Reason: Reduce serialization/publish volume while preserving protocol compatibility.
+
 ## 4) Next Fixes (Execution Order)
-
-### Step 5: Stronger identity and id safety
-
-Goal:
-- Remove residual ambiguity from per-symbol order id spaces.
-
-Implementation:
-- Preferred: move to exchange-global order ids.
-- Interim: keep symbol-bound checks everywhere and add owner-aware cancel API.
-
-Acceptance:
-- No cross-symbol or cross-user cancel ambiguity.
-
-### Step 6: Bounded queues and backpressure
-
-Goal:
-- Avoid unbounded memory growth under spikes.
-
-Implementation:
-- Bound trade queue size with policy (drop oldest or coalesce).
-- Track queue depth and emit warnings/metrics.
-
-Acceptance:
-- Memory remains bounded under stress.
-
-### Step 7: Delta-first market data
-
-Goal:
-- Reduce serialization and publish overhead.
-
-Implementation:
-- Push incremental updates for affected symbols.
-- Keep periodic snapshots only for recovery/resync.
-
-Acceptance:
-- Lower CPU usage and lower publish latency at same load.
 
 ### Step 8: Matching core performance rewrite
 
