@@ -161,7 +161,7 @@ void MarketSimulator::injectOrders() {
             bid.side     = Side::BUY;
             bid.type     = OrderType::LIMIT;
             bid.price    = mid * (1.0 - bid_offset);
-            bid.quantity = bid_qty;
+            bid.quantity = bid_qty * 100;
             bid.is_bot   = true;
             double submitted_qty = bid.quantity;
             engine_.processOrder(bid);
@@ -185,7 +185,7 @@ void MarketSimulator::injectOrders() {
             ask.side     = Side::SELL;
             ask.type     = OrderType::LIMIT;
             ask.price    = mid * (1.0 + ask_offset);
-            ask.quantity = ask_qty;
+            ask.quantity = ask_qty * 100;
             ask.is_bot   = true;
             double submitted_qty = ask.quantity;
             engine_.processOrder(ask);
