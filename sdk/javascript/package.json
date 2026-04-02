@@ -1,0 +1,22 @@
+{
+  "name": "synthetic-bull-sdk",
+  "version": "0.1.0",
+  "description": "JavaScript SDK for Synthetic-Bull trading platform",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "trading",
+    "websocket",
+    "bot",
+    "exchange",
+    "sdk"
+  ],
+  "author": "Synthetic-Bull Team",
+  "license": "ISC",
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}

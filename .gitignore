@@ -25,6 +25,9 @@ Thumbs.db
 # Dependencies (fetched at build time)
 backend/deps/
 
+# Node.js
+node_modules/
+
 INTEGRATION.md
 README.md
 bots/FRONTEND_BOTS_API_README.md
