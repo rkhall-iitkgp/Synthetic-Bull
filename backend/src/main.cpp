@@ -370,6 +370,27 @@ static json candleToJson(const std::string& symbol, const sb::Candle& c) {
     };
 }
 
+static json historyToJson(const std::string& symbol, const std::vector<sb::Candle>& candles) {
+    json arr = json::array();
+
+    for (const auto& c : candles) {
+        arr.push_back({
+            {"o", std::round(c.open * 100.0) / 100.0},
+            {"h", std::round(c.high * 100.0) / 100.0},
+            {"l", std::round(c.low * 100.0) / 100.0},
+            {"c", std::round(c.close * 100.0) / 100.0},
+            {"v", std::round(c.volume * 100000.0) / 100000.0},
+            {"t", c.timestamp}
+        });
+    }
+
+    return {
+        {"type", "history"},
+        {"symbol", symbol},
+        {"candles", arr}
+    };
+}
+
 // ─── Trade callback (called by each MatchingEngine on every fill) ────────────
 
 static void onTrade(const std::string& symbol, const sb::Trade& trade) {
@@ -599,15 +620,6 @@ int main() {
             };
             ws->send(welcome.dump(), uWS::OpCode::TEXT);
 
-            g_exchange.forEachSymbol([&](const std::string& sym, sb::SymbolState& state) {
-                auto snap = state.engine->getSnapshot(20);
-                ws->send(obSnapshotToJson(sym, snap).dump(), uWS::OpCode::TEXT);
-                auto candles = state.candles->getHistory(200);
-                for (auto& c : candles) {
-                    ws->send(candleToJson(sym, c).dump(), uWS::OpCode::TEXT);
-                }
-            });
-
             {
                 std::lock_guard<std::mutex> lock(g_portfolio_mutex);
                 auto it = g_portfolios.find("sim_bot");
@@ -616,6 +628,13 @@ int main() {
                 }
             }
             ws->send(openOrdersToJson("sim_bot").dump(), uWS::OpCode::TEXT);
+
+            g_exchange.forEachSymbol([&](const std::string& sym, sb::SymbolState& state) {
+                auto snap = state.engine->getSnapshot(20);
+                ws->send(obSnapshotToJson(sym, snap).dump(), uWS::OpCode::TEXT);
+                auto candles = state.candles->getHistory(200);
+                ws->send(historyToJson(sym, candles).dump(), uWS::OpCode::TEXT);
+            });
         },
 
         // ── on message ──
@@ -712,21 +731,19 @@ int main() {
                 };
                 ws->send(welcome.dump(), uWS::OpCode::TEXT);
 
-                g_exchange.forEachSymbol([&](const std::string& sym, sb::SymbolState& state) {
-                    auto snap = state.engine->getSnapshot(20);
-                    ws->send(obSnapshotToJson(sym, snap).dump(), uWS::OpCode::TEXT);
-                    auto candles = state.candles->getHistory(200);
-                    for (auto& c : candles) {
-                        ws->send(candleToJson(sym, c).dump(), uWS::OpCode::TEXT);
-                    }
-                });
-
                 {
                     std::lock_guard<std::mutex> lock(g_portfolio_mutex);
                     auto& pf = g_portfolios[bot_id];
                     ws->send(portfolioToJson(pf).dump(), uWS::OpCode::TEXT);
                 }
                 ws->send(openOrdersToJson(bot_id).dump(), uWS::OpCode::TEXT);
+
+                g_exchange.forEachSymbol([&](const std::string& sym, sb::SymbolState& state) {
+                    auto snap = state.engine->getSnapshot(20);
+                    ws->send(obSnapshotToJson(sym, snap).dump(), uWS::OpCode::TEXT);
+                    auto candles = state.candles->getHistory(200);
+                    ws->send(historyToJson(sym, candles).dump(), uWS::OpCode::TEXT);
+                });
 
                 std::cout << "[+] Bot " << bot_id << " authenticated\n";
                 return;
