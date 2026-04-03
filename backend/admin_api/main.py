@@ -8,7 +8,7 @@ from typing import List, Optional
 import datetime
 
 import models, schemas
-from database import engine, get_db
+from database import engine, get_db, SessionLocal
 from sqlalchemy.sql import func
 from worker import logger_worker, deposit_queue
 
@@ -27,8 +27,35 @@ app.add_middleware(
 
 active_connections: List[WebSocket] = []
 
+DEFAULT_ALPHA_API_KEY = "sk_live_2f55c85f1bf3f19535f4f8763c6bbc51"
+DEFAULT_MM_API_KEY = "sk_live_1641719b61f46e9efe1a543ee948307b"
+
+def seed_database(db: Session):
+    alpha_bot = db.query(models.Bot).filter(models.Bot.api_key == DEFAULT_ALPHA_API_KEY).first()
+    if not alpha_bot:
+        db_bot = models.Bot(name="Alpha Bot", api_key=DEFAULT_ALPHA_API_KEY)
+        db.add(db_bot)
+        db.commit()
+        db_portfolio = models.Portfolio(bot_id=db_bot.id, cash_balance=100000.0)
+        db.add(db_portfolio)
+        db.commit()
+
+    mm_bot = db.query(models.Bot).filter(models.Bot.api_key == DEFAULT_MM_API_KEY).first()
+    if not mm_bot:
+        db_bot = models.Bot(name="Market Maker Bot", api_key=DEFAULT_MM_API_KEY)
+        db.add(db_bot)
+        db.commit()
+        db_portfolio = models.Portfolio(bot_id=db_bot.id, cash_balance=100000.0)
+        db.add(db_portfolio)
+        db.commit()
+
 @app.on_event("startup")
 async def startup_event():
+    db = SessionLocal()
+    try:
+        seed_database(db)
+    finally:
+        db.close()
     asyncio.create_task(logger_worker())
 
 def generate_api_key():
